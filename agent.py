@@ -224,10 +224,7 @@ def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
     # Default to Claude Haiku 3.5 - cheapest model with highest free tier limits
     llm_name = model_name or os.getenv("LLM_NAME", "claude-3-5-haiku-latest")
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "sk-ANTHROPIC_API_KEY")
     
     llm = ChatAnthropic(
         model=llm_name,
