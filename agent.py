@@ -575,24 +575,14 @@ def run_single_query(query: str, repo_path: str | None = None, mop_path: str | N
     state = create_initial_state(repo_path, mop_path)
     state["messages"] = [HumanMessage(content=query)]
     
-    try:
-        result = graph.invoke(state, {"recursion_limit": 100})
-        
-        # Extract the last AI message
-        for msg in reversed(result["messages"]):
-            if isinstance(msg, AIMessage):
-                return msg.content
-        
-        return "No response generated."
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "credit balance is too low" in error_msg:
-            return "Error: Anthropic API credit balance is too low. Add credits at https://console.anthropic.com/settings/billing"
-        elif "rate_limit" in error_msg.lower():
-            return "Error: Rate limit reached. Please wait and try again."
-        else:
-            return f"Error: {e}"
+    result = graph.invoke(state, {"recursion_limit": 100})
+    
+    # Extract the last AI message
+    for msg in reversed(result["messages"]):
+        if isinstance(msg, AIMessage):
+            return msg.content
+    
+    return "No response generated."
 
 
 def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
@@ -654,22 +644,9 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
                     
             except Exception as e:
                 error_msg = str(e)
-                if "credit balance is too low" in error_msg or "invalid_request_error" in error_msg:
-                    print("\n" + "=" * 60)
-                    print("ANTHROPIC API BILLING ERROR")
-                    print("=" * 60)
-                    print("Your Anthropic API credit balance is too low.")
-                    print("\nTo fix this:")
-                    print("1. Go to: https://console.anthropic.com/settings/billing")
-                    print("2. Add credits or upgrade your plan")
-                    print("3. Then run the agent again")
-                    print("=" * 60 + "\n")
-                elif "rate_limit" in error_msg.lower():
-                    print("\nRate limit reached. Please wait a moment and try again.\n")
-                else:
-                    print(f"\nError: {e}\n")
-                    import traceback
-                    traceback.print_exc()
+                print(f"\nError: {error_msg}\n")
+                import traceback
+                traceback.print_exc()
     
     except KeyboardInterrupt:
         print("\n\nInterrupted. Goodbye!")
