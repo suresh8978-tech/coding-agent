@@ -15,6 +15,7 @@ Usage:
 import argparse
 import os
 import sys
+import logging
 from typing import Annotated, Any, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -66,6 +67,18 @@ from tools.approval import (
 # Load environment variables
 load_dotenv()
 
+# Configure logger
+logger = logging.getLogger(__name__)
+
+def setup_logging():
+    """Configure logging to file."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename='agent.log',
+        filemode='a'
+    )
+
 
 # =============================================================================
 # Agent State Definition
@@ -92,6 +105,10 @@ class AgentState(TypedDict):
     
     # MOP content (if loaded)
     mop_content: dict | None
+    
+    # Path configuration
+    repo_path: str | None
+    mop_path: str | None
     
     # User feedback for revisions
     user_feedback: str | None
@@ -241,7 +258,14 @@ def agent_node(state: AgentState) -> dict:
     
     # Add system prompt if not present
     if not messages or not isinstance(messages[0], SystemMessage):
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(messages)
+        system_content = SYSTEM_PROMPT
+        
+        # Add MOP context if available
+        mop_content = state.get("mop_content")
+        if mop_content:
+            system_content += build_context_message(mop_content)
+            
+        messages = [SystemMessage(content=system_content)] + list(messages)
     
     # Check if we're awaiting approval
     if state.get("awaiting_modification_approval"):
@@ -263,6 +287,35 @@ def agent_node(state: AgentState) -> dict:
     response = agent.invoke(messages)
     
     return {"messages": [response]}
+
+
+def setup_node(state: AgentState) -> dict:
+    """Initialize the agent environment (paths, MOP loading)."""
+    # Handle repo path
+    repo_path = state.get("repo_path")
+    if repo_path:
+        current_path = os.getcwd()
+        if os.path.abspath(repo_path) != current_path:
+            try:
+                os.chdir(repo_path)
+                logger.info(f"Working directory set to: {repo_path}")
+            except Exception as e:
+                logger.error(f"Error changing directory to {repo_path}: {e}")
+    
+    # Handle MOP loading
+    updates = {}
+    mop_path = state.get("mop_path")
+    if mop_path and not state.get("mop_content"):
+        try:
+            mop_content = load_mop_content(mop_path)
+            if mop_content:
+                updates["mop_content"] = mop_content
+                logger.info(f"Loaded MOP content from {mop_path}")
+        except Exception as e:
+            logger.error(f"Failed to load MOP from {mop_path}: {e}")
+            # We don't crash, just log error
+    
+    return updates
 
 
 def should_continue(state: AgentState) -> Literal["tools", "approval_check", "end"]:
@@ -355,19 +408,19 @@ def tools_node(state: AgentState) -> dict:
     if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return {}
     
-    # Print tool calls being made
-    print("\n" + "-" * 60)
-    print("TOOL EXECUTION")
-    print("-" * 60)
+    # Log tool calls being made
+    logger.info("-" * 60)
+    logger.info("TOOL EXECUTION")
+    logger.info("-" * 60)
     
     for tc in last_message.tool_calls:
-        print(f"\nTool: {tc['name']}")
-        print(f"  Input: {_truncate_str(str(tc.get('args', {})), 200)}")
+        logger.info(f"Tool: {tc['name']}")
+        logger.info(f"  Input: {_truncate_str(str(tc.get('args', {})), 200)}")
     
     tool_node = ToolNode(ALL_TOOLS)
     result = tool_node.invoke(state)
     
-    # Print tool results
+    # Log tool results
     for msg in result.get("messages", []):
         if isinstance(msg, ToolMessage):
             # Find matching tool call
@@ -378,10 +431,10 @@ def tools_node(state: AgentState) -> dict:
                     break
             
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
-            print(f"\nOutput from {tool_name}:")
-            print(f"  {_truncate_str(output, 500)}")
+            logger.info(f"Output from {tool_name}:")
+            logger.info(f"  {_truncate_str(output, 500)}")
     
-    print("\n" + "-" * 60)
+    logger.info("-" * 60)
     
     # Check if any modification tools were called
     modification_tools = {
@@ -429,14 +482,17 @@ def create_graph():
     workflow = StateGraph(AgentState)
     
     # Add nodes
+    workflow.add_node("setup", setup_node)
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tools_node)
     workflow.add_node("approval_check", approval_check_node)
     
     # Set entry point
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("setup")
     
     # Add edges
+    workflow.add_edge("setup", "agent")
+    
     workflow.add_conditional_edges(
         "agent",
         should_continue,
@@ -463,18 +519,18 @@ def load_mop_content(mop_path: str) -> dict | None:
         return None
     
     from tools.mop_parser import read_mop_document
-    print(f"Loading MOP document: {mop_path}")
+    logger.info(f"Loading MOP document: {mop_path}")
     result = read_mop_document.invoke({"path": mop_path})
     
     if isinstance(result, dict) and "error" in result:
-        print(f"Error loading MOP: {result['error']}")
+        logger.error(f"Error loading MOP: {result['error']}")
         return None
     
-    print(f"MOP loaded successfully. {result.get('stats', {}).get('word_count', 0)} words.")
+    logger.info(f"MOP loaded successfully. {result.get('stats', {}).get('word_count', 0)} words.")
     return result
 
 
-def create_initial_state(mop_content: dict | None = None) -> AgentState:
+def create_initial_state(repo_path: str | None = None, mop_path: str | None = None) -> AgentState:
     """Create initial agent state."""
     return {
         "messages": [],
@@ -486,8 +542,10 @@ def create_initial_state(mop_content: dict | None = None) -> AgentState:
         "current_branch": None,
         "original_branch": None,
         "branch_created": False,
-        "mop_content": mop_content,
+        "mop_content": None,
         "user_feedback": None,
+        "repo_path": repo_path,
+        "mop_path": mop_path,
     }
 
 
@@ -510,18 +568,12 @@ def build_context_message(mop_content: dict | None) -> str:
     return context
 
 
-def run_single_query(query: str, mop_content: dict | None = None) -> str:
+def run_single_query(query: str, repo_path: str | None = None, mop_path: str | None = None) -> str:
     """Run a single query in non-interactive mode."""
+    setup_logging()
     graph = create_graph()
-    state = create_initial_state(mop_content)
-    
-    # Build the query with MOP context if available
-    full_query = query
-    if mop_content:
-        context = build_context_message(mop_content)
-        full_query = context + "\n\nUser Query: " + query
-    
-    state["messages"] = [HumanMessage(content=full_query)]
+    state = create_initial_state(repo_path, mop_path)
+    state["messages"] = [HumanMessage(content=query)]
     
     try:
         result = graph.invoke(state, {"recursion_limit": 100})
@@ -543,16 +595,15 @@ def run_single_query(query: str, mop_content: dict | None = None) -> str:
             return f"Error: {e}"
 
 
-def run_interactive(mop_content: dict | None = None):
+def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
     """Run the agent in interactive mode."""
+    setup_logging()
     graph = create_graph()
-    state = create_initial_state(mop_content)
+    state = create_initial_state(repo_path, mop_path)
     
     print("=" * 60)
     print("Coding Agent with Ansible & Python Capabilities")
     print("=" * 60)
-    if mop_content:
-        print(f"MOP loaded: {mop_content.get('title', 'Untitled')}")
     print("Commands:")
     print("  - Type your request to interact with the agent")
     print("  - 'approve' to approve pending changes")
@@ -562,10 +613,9 @@ def run_interactive(mop_content: dict | None = None):
     print("=" * 60)
     print()
     
-    # Add MOP context to first message if available
-    mop_context = build_context_message(mop_content) if mop_content else ""
-    
     try:
+        pass
+
         while True:
             try:
                 user_input = input("You: ").strip()
@@ -578,14 +628,8 @@ def run_interactive(mop_content: dict | None = None):
             if user_input.lower() in ["quit", "exit", "q"]:
                 print("Goodbye!")
                 break
-            
-            # Add MOP context to first user message
-            if mop_context and len(state["messages"]) == 0:
-                full_input = mop_context + "\n\nUser Query: " + user_input
-            else:
-                full_input = user_input
-            
-            state["messages"] = list(state["messages"]) + [HumanMessage(content=full_input)]
+                
+            state["messages"] = list(state["messages"]) + [HumanMessage(content=user_input)]
             
             try:
                 result = graph.invoke(state, {"recursion_limit": 100})
@@ -670,23 +714,15 @@ if __name__ == "__main__":
     load_dotenv()
     args = parse_args()
     
-    # Set repo path
+    # Set repo path defaults (but don't change dir yet)
     repo_path = args.repo or os.getenv("REPO_PATH")
-    if repo_path:
-        os.chdir(repo_path)
-        print(f"Working directory: {repo_path}")
-    
-    # Load MOP if provided
-    mop_content = None
-    if args.mop:
-        mop_content = load_mop_content(args.mop)
     
     # Run in appropriate mode
     if args.query:
         # Non-interactive mode
-        response = run_single_query(args.query, mop_content)
+        response = run_single_query(args.query, repo_path, args.mop)
         print(response)
     else:
         # Interactive mode
-        run_interactive(mop_content)
+        run_interactive(repo_path, args.mop)
 
