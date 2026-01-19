@@ -106,6 +106,9 @@ class AgentState(TypedDict):
     # MOP content (if loaded)
     mop_content: dict | None
     
+    # AGENT.md content (if found in repo root)
+    agent_md_content: str | None
+    
     # Path configuration
     repo_path: str | None
     mop_path: str | None
@@ -260,6 +263,11 @@ def agent_node(state: AgentState) -> dict:
     if not messages or not isinstance(messages[0], SystemMessage):
         system_content = SYSTEM_PROMPT
         
+        # Add AGENT.md context if available (high priority)
+        agent_md_content = state.get("agent_md_content")
+        if agent_md_content:
+            system_content += build_agent_md_context(agent_md_content)
+        
         # Add MOP context if available
         mop_content = state.get("mop_content")
         if mop_content:
@@ -302,8 +310,15 @@ def setup_node(state: AgentState) -> dict:
             except Exception as e:
                 logger.error(f"Error changing directory to {repo_path}: {e}")
     
-    # Handle MOP loading
     updates = {}
+    
+    # Handle AGENT.md loading (check in repo root)
+    if not state.get("agent_md_content"):
+        agent_md_content = load_agent_md(repo_path)
+        if agent_md_content:
+            updates["agent_md_content"] = agent_md_content
+    
+    # Handle MOP loading
     mop_path = state.get("mop_path")
     if mop_path and not state.get("mop_content"):
         try:
@@ -513,6 +528,32 @@ def create_graph():
 # Agent Runner Functions
 # =============================================================================
 
+def load_agent_md(repo_path: str | None = None) -> str | None:
+    """Load AGENT.md content from the repo root directory.
+    
+    Args:
+        repo_path: Path to the repository root. If None, uses current directory.
+        
+    Returns:
+        The content of AGENT.md if it exists, None otherwise.
+    """
+    base_path = repo_path or os.getcwd()
+    agent_md_path = os.path.join(base_path, "AGENT.md")
+    
+    if not os.path.isfile(agent_md_path):
+        logger.info(f"AGENT.md not found at {agent_md_path}")
+        return None
+    
+    try:
+        with open(agent_md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        logger.info(f"Loaded AGENT.md from {agent_md_path} ({len(content)} chars)")
+        return content
+    except Exception as e:
+        logger.error(f"Error reading AGENT.md: {e}")
+        return None
+
+
 def load_mop_content(mop_path: str) -> dict | None:
     """Load MOP document content."""
     if not mop_path:
@@ -543,10 +584,36 @@ def create_initial_state(repo_path: str | None = None, mop_path: str | None = No
         "original_branch": None,
         "branch_created": False,
         "mop_content": None,
+        "agent_md_content": None,
         "user_feedback": None,
         "repo_path": repo_path,
         "mop_path": mop_path,
     }
+
+
+def build_agent_md_context(agent_md_content: str | None) -> str:
+    """Build context message with AGENT.md instructions.
+    
+    AGENT.md contains project-specific instructions that take priority
+    for code analysis and modifications.
+    """
+    if not agent_md_content:
+        return ""
+    
+    context = "\n\n" + "=" * 60 + "\n"
+    context += "[PROJECT-SPECIFIC INSTRUCTIONS - AGENT.md]\n"
+    context += "=" * 60 + "\n"
+    context += "\nThe following instructions were found in AGENT.md in the repository root.\n"
+    context += "These instructions MUST be followed for ALL code analysis and code modifications.\n"
+    context += "When a MOP document is also loaded, apply these AGENT.md rules to MOP-based changes as well.\n"
+    context += "\n--- AGENT.MD CONTENT ---\n"
+    context += agent_md_content[:30000]  # Limit to 30k chars
+    if len(agent_md_content) > 30000:
+        context += "\n... (content truncated)"
+    context += "\n--- END AGENT.MD CONTENT ---\n"
+    context += "\n" + "=" * 60 + "\n"
+    
+    return context
 
 
 def build_context_message(mop_content: dict | None) -> str:
