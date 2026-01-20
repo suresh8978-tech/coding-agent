@@ -18,6 +18,15 @@ def _run_git_command(args: list[str], cwd: Optional[str] = None) -> tuple[bool, 
         Tuple of (success, output_or_error).
     """
     repo_path = cwd or os.environ.get("REPO_PATH", ".")
+    
+    if not os.path.exists(repo_path):
+        return False, f"Repository path '{repo_path}' does not exist."
+
+    # Check if git is installed
+    import shutil
+    if not shutil.which("git"):
+        return False, "Git executable not found in PATH."
+
     try:
         result = subprocess.run(
             ["git"] + args,
@@ -32,8 +41,6 @@ def _run_git_command(args: list[str], cwd: Optional[str] = None) -> tuple[bool, 
             return False, result.stderr.strip() or result.stdout.strip()
     except subprocess.TimeoutExpired:
         return False, "Git command timed out."
-    except FileNotFoundError:
-        return False, "Git is not installed or not in PATH."
     except Exception as e:
         return False, f"Error running git command: {str(e)}"
 
