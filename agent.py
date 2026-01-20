@@ -26,7 +26,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 # Import all tools
-from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, list_directory, delete_file, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -195,7 +195,6 @@ Remember: NEVER apply changes without explicit user approval!"""
 ALL_TOOLS = [
     # File operations
     read_file,
-    write_file,
     list_directory,
     delete_file,
     file_exists,
