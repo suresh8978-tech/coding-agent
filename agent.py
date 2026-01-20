@@ -62,6 +62,7 @@ from tools.approval import (
     generate_unified_diff,
     format_changes_for_display,
     format_push_request,
+    apply_pending_change,
 )
 
 # Load environment variables
@@ -144,7 +145,8 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 2. These tools return a diff showing the proposed changes - DO NOT apply them yet
 3. Present the modification plan with ALL diffs to the user and wait for approval
 4. If the user requests changes, incorporate their feedback and present the updated plan
-5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using write_file
+5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using apply_pending_change tool
+   - Use the 'file' field as file_path, and the 'modified' field as new_content from each pending change
 
 ### Push Approval Process:
 1. After changes are applied and committed, ask for push approval
@@ -233,6 +235,8 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
+    # Approval workflow
+    apply_pending_change,
 ]
 
 
