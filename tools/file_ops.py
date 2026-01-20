@@ -160,3 +160,43 @@ def file_exists(path: str) -> str:
             return f"Path '{path}' exists but is of unknown type."
     except Exception as e:
         return f"Error checking path: {str(e)}"
+
+
+@tool
+def replace_in_file(path: str, original: str, replacement: str) -> str:
+    """Replace a specific section of a file with new content.
+    
+    Use this tool for partial edits to avoid rewriting the entire file.
+    The original text must match exactly (including whitespace and indentation).
+    
+    Args:
+        path: Absolute or relative path to the file.
+        original: The exact text segment to replace.
+        replacement: The new text segment to insert.
+        
+    Returns:
+        Success message or error description.
+    """
+    try:
+        file_path = Path(path)
+        if not file_path.exists():
+            return f"Error: File '{path}' does not exist."
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        if original not in content:
+            return f"Error: Original text not found in '{path}'. ensure exact match including whitespace."
+        
+        # Check for multiple occurrences
+        if content.count(original) > 1:
+            return f"Error: Original text found multiple times in '{path}'. Please provide a more unique context."
+            
+        new_content = content.replace(original, replacement)
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+            
+        return f"Successfully replaced content in '{path}'."
+    except Exception as e:
+        return f"Error replacing in file: {str(e)}"
