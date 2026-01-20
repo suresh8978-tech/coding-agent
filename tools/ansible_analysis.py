@@ -42,16 +42,22 @@ def scan_ansible_project(path: str) -> dict[str, Any]:
     playbooks, roles, tasks, and variables.
     
     Args:
-        path: Path to the Ansible project directory.
+        path: Path to the Ansible project directory (relative to repo root or absolute).
         
     Returns:
         Dictionary containing the project structure and analysis.
     """
-    project_path = Path(path)
+    # Try to resolve path relative to REPO_PATH if set, otherwise CWD
+    repo_path = os.environ.get("REPO_PATH")
+    if repo_path and not os.path.isabs(path):
+        project_path = Path(repo_path) / path
+    else:
+        project_path = Path(path).resolve()
+        
     if not project_path.exists():
-        return {"error": f"Path '{path}' does not exist."}
+        return {"error": f"Path '{project_path}' does not exist."}
     if not project_path.is_dir():
-        return {"error": f"Path '{path}' is not a directory."}
+        return {"error": f"Path '{project_path}' is not a directory."}
     
     try:
         from ansible_content_capture.scanner import AnsibleScanner
@@ -133,8 +139,14 @@ def analyze_playbook(path: str) -> dict[str, Any]:
     try:
         with open(file_path, 'r') as f:
             content = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        return {"error": f"YAML parsing error: {str(e)}"}
+    except yaml.YAMLError:
+        # Fallback for files with Jinja2 templates causing YAML errors
+        return {
+            "file": path,
+            "error": "File contains invalid YAML (likely Jinja2 templates)",
+            "plays": [],
+            "summary": {"play_count": 0, "total_tasks": 0, "total_roles": 0}
+        }
     except Exception as e:
         return {"error": f"Error reading file: {str(e)}"}
     
@@ -244,6 +256,7 @@ def analyze_role(path: str) -> dict[str, Any]:
             with open(file_path, 'r') as f:
                 return yaml.safe_load(f)
         except Exception:
+            # Return None on any error (including YAMLError) to be safe
             return None
     
     # Load tasks/main.yml
@@ -331,6 +344,7 @@ def find_tasks_using_module(path: str, module: str) -> list[dict[str, Any]]:
             with open(yaml_file, 'r') as f:
                 content = yaml.safe_load(f)
         except Exception:
+            # Skip files that can't be parsed
             continue
         
         def find_module_in_tasks(tasks, file_path, context=""):
@@ -398,7 +412,11 @@ def get_variable_usage(path: str) -> dict[str, Any]:
     for yaml_file in yaml_files:
         try:
             content = yaml_file.read_text()
-            parsed = yaml.safe_load(content)
+            # Try to parse to get structure, but don't fail if we can't
+            try:
+                parsed = yaml.safe_load(content)
+            except Exception:
+                parsed = None
         except Exception:
             continue
         
