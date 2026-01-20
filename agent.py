@@ -26,7 +26,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 # Import all tools
-from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, write_file, replace_in_file, list_directory, delete_file, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -141,8 +141,12 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 2. These tools return a diff showing the proposed changes - DO NOT apply them yet
 3. Present the modification plan with ALL diffs to the user and wait for approval
 4. If the user requests changes, incorporate their feedback and present the updated plan
-5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using write_file tool
-   - Use the 'file' field as path, and the 'modified' field as content from each pending change
+4. If the user requests changes, incorporate their feedback and present the updated plan
+5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using appropriate tools:
+   - For partial edits (PREFERRED): Use `replace_in_file` tool to modify specific sections without rewriting the whole file
+   - For full file rewrites: Use `write_file` tool
+   - For code-specific changes: Use `modify_python_code`, `modify_task`, etc.
+   - Use the inputs from your approved plan
 
 ### Push Approval Process:
 1. After changes are applied and committed, ask for push approval
@@ -192,6 +196,7 @@ ALL_TOOLS = [
     # File operations
     read_file,
     write_file,
+    replace_in_file,
     list_directory,
     delete_file,
     file_exists,
@@ -296,27 +301,57 @@ def agent_node(state: AgentState) -> dict:
     return {"messages": [response]}
 
 
+def find_repo_root(start_path: str = ".") -> str | None:
+    """Find the root of the git repository starting from start_path."""
+    try:
+        current = os.path.abspath(start_path)
+        if os.path.isdir(os.path.join(current, ".git")):
+            return current
+        
+        parent = os.path.dirname(current)
+        while parent != current:
+            if os.path.isdir(os.path.join(current, ".git")):
+                return current
+            current = parent
+            parent = os.path.dirname(current)
+        return None
+    except Exception:
+        return None
+
 def setup_node(state: AgentState) -> dict:
     """Initialize the agent environment (paths, MOP loading)."""
-    # Handle repo path
+    # Handle repo path detection
     repo_path = state.get("repo_path")
-    if repo_path:
-        current_path = os.getcwd()
-        if os.path.abspath(repo_path) != current_path:
-            try:
-                os.chdir(repo_path)
-                logger.info(f"Working directory set to: {repo_path}")
-            except Exception as e:
-                logger.error(f"Error changing directory to {repo_path}: {e}")
+    
+    # If repo_path detector logic
+    if not repo_path:
+        repo_path = find_repo_root()
+        if repo_path:
+            logger.info(f"Auto-detected repository root at: {repo_path}")
+    elif repo_path:
+        # Resolve to absolute path
+        repo_path = os.path.abspath(repo_path)
     
     updates = {}
     
+    if repo_path:
+        try:
+            current_path = os.getcwd()
+            if repo_path != current_path:
+                os.chdir(repo_path)
+                logger.info(f"Working directory set to: {repo_path}")
+                
+            updates["repo_path"] = repo_path
+            os.environ["REPO_PATH"] = repo_path
+        except Exception as e:
+            logger.error(f"Error changing directory to {repo_path}: {e}")
+            
     # Handle AGENT.md loading (check in repo root)
     if not state.get("agent_md_content"):
         agent_md_content = load_agent_md(repo_path)
         if agent_md_content:
             updates["agent_md_content"] = agent_md_content
-    
+            
     # Handle MOP loading
     mop_path = state.get("mop_path")
     if mop_path and not state.get("mop_content"):
@@ -328,6 +363,7 @@ def setup_node(state: AgentState) -> dict:
         except Exception as e:
             logger.error(f"Failed to load MOP from {mop_path}: {e}")
             # We don't crash, just log error
+
     
     return updates
 
@@ -536,7 +572,12 @@ def load_agent_md(repo_path: str | None = None) -> str | None:
     Returns:
         The content of AGENT.md if it exists, None otherwise.
     """
-    base_path = repo_path or os.getcwd()
+    if repo_path:
+        base_path = os.path.abspath(repo_path)
+    else:
+        # fallback to CWD or detection
+        base_path = find_repo_root() or os.getcwd()
+        
     agent_md_path = os.path.join(base_path, "AGENT.md")
     
     if not os.path.isfile(agent_md_path):
