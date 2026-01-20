@@ -26,7 +26,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 # Import all tools
-from tools.file_ops import read_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -57,12 +57,8 @@ from tools.ansible_analysis import (
 from tools.ansible_coding import modify_task, add_task, modify_variable, modify_yaml_file
 from tools.shell_ops import run_shell_command, find_files, search_in_files
 from tools.approval import (
-    PendingChange,
-    create_modification_plan,
-    generate_unified_diff,
     format_changes_for_display,
     format_push_request,
-    apply_pending_change,
 )
 
 # Load environment variables
@@ -145,8 +141,8 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 2. These tools return a diff showing the proposed changes - DO NOT apply them yet
 3. Present the modification plan with ALL diffs to the user and wait for approval
 4. If the user requests changes, incorporate their feedback and present the updated plan
-5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using apply_pending_change tool
-   - Use the 'file' field as file_path, and the 'modified' field as new_content from each pending change
+5. Only after explicit approval ("approve", "yes", "proceed", etc.), apply the changes using write_file tool
+   - Use the 'file' field as path, and the 'modified' field as content from each pending change
 
 ### Push Approval Process:
 1. After changes are applied and committed, ask for push approval
@@ -195,6 +191,7 @@ Remember: NEVER apply changes without explicit user approval!"""
 ALL_TOOLS = [
     # File operations
     read_file,
+    write_file,
     list_directory,
     delete_file,
     file_exists,
@@ -207,6 +204,7 @@ ALL_TOOLS = [
     git_push,
     git_diff,
     git_status,
+    get_current_branch,
     # MOP parsing
     read_mop_document,
     # Python analysis
@@ -234,8 +232,6 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
-    # Approval workflow
-    apply_pending_change,
 ]
 
 
