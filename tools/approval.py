@@ -2,7 +2,37 @@
 
 import difflib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from langchain_core.tools import tool
+
+
+@tool
+def apply_pending_change(file_path: str, new_content: str) -> str:
+    """Apply an approved change by writing the new content to the file.
+    
+    This tool should be used after a modification has been approved.
+    Use the 'modified' content from the pending change dictionary.
+    
+    Args:
+        file_path: Path to the file to write.
+        new_content: The new content to write (from the 'modified' field of the pending change).
+        
+    Returns:
+        Success message or error description.
+    """
+    try:
+        path = Path(file_path)
+        # Create parent directories if they don't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        return f"Successfully applied change to '{file_path}'."
+    except PermissionError:
+        return f"Error: Permission denied writing to '{file_path}'."
+    except Exception as e:
+        return f"Error applying change: {str(e)}"
 
 
 @dataclass
