@@ -641,17 +641,18 @@ def build_agent_md_context(agent_md_content: str | None) -> str:
         return ""
     
     context = "\n\n" + "=" * 60 + "\n"
-    context += "[PROJECT-SPECIFIC INSTRUCTIONS - AGENT.md]\n"
+    context += "CRITICAL: PROJECT-SPECIFIC INSTRUCTIONS (AGENT.md)\n"
     context += "=" * 60 + "\n"
-    context += "\nThe following instructions were found in AGENT.md in the repository root.\n"
-    context += "These instructions MUST be followed for ALL code analysis and code modifications.\n"
-    context += "When a MOP document is also loaded, apply these AGENT.md rules to MOP-based changes as well.\n"
-    context += "\n--- AGENT.MD CONTENT ---\n"
+    context += "\nThese instructions from AGENT.md have the HIGHEST PRIORITY.\n"
+    context += "You MUST follow these rules for ALL operations in this repository.\n"
+    context += "If these instructions conflict with your general behavior, AGENT.md takes precedence.\n"
+    context += "\n" + "-" * 40 + "\n"
     context += agent_md_content[:30000]  # Limit to 30k chars
     if len(agent_md_content) > 30000:
         context += "\n... (content truncated)"
-    context += "\n--- END AGENT.MD CONTENT ---\n"
-    context += "\n" + "=" * 60 + "\n"
+    context += "\n" + "-" * 40 + "\n"
+    context += "END OF AGENT.MD INSTRUCTIONS\n"
+    context += "=" * 60 + "\n"
     
     return context
 
