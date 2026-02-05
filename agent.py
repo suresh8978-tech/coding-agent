@@ -28,7 +28,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 
 # Import all tools
-from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, write_file, list_directory, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -211,7 +211,6 @@ ALL_TOOLS = [
     read_file,
     write_file,
     list_directory,
-    delete_file,
     file_exists,
     # Git operations
     git_fetch_all,
