@@ -1,6 +1,6 @@
 """Tools package for the coding agent."""
 
-from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, write_file, list_directory, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -41,7 +41,6 @@ __all__ = [
     "read_file",
     "write_file",
     "list_directory",
-    "delete_file",
     "file_exists",
     # Shell operations
     "run_shell_command",
