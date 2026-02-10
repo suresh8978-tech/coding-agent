@@ -114,31 +114,6 @@ def list_directory(path: str, max_items: int = 50) -> str:
 
 
 @tool
-def delete_file(path: str) -> str:
-    """Delete a file.
-    
-    Args:
-        path: Absolute or relative path to the file to delete.
-        
-    Returns:
-        Success message or error description.
-    """
-    try:
-        file_path = Path(path)
-        if not file_path.exists():
-            return f"Error: File '{path}' does not exist."
-        if not file_path.is_file():
-            return f"Error: '{path}' is not a file."
-        
-        file_path.unlink()
-        return f"Successfully deleted '{path}'."
-    except PermissionError:
-        return f"Error: Permission denied deleting '{path}'."
-    except Exception as e:
-        return f"Error deleting file: {str(e)}"
-
-
-@tool
 def file_exists(path: str) -> str:
     """Check if a file or directory exists.
     

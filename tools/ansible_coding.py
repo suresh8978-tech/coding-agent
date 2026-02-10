@@ -50,17 +50,29 @@ def modify_task(path: str, task_name: str, new_spec: dict) -> dict[str, Any]:
                 break
         return tasks
     
-    # Handle playbook format
+    # Handle different YAML formats
     if isinstance(content, list):
-        for play in content:
-            if isinstance(play, dict):
-                if "tasks" in play:
-                    play["tasks"] = find_and_modify_task(play["tasks"])
-                if "handlers" in play:
-                    play["handlers"] = find_and_modify_task(play["handlers"])
-    # Handle task file format
-    elif isinstance(content, list):
-        modified_content = find_and_modify_task(content)
+        # Check if this is a playbook (list of plays) or task file (list of tasks)
+        is_playbook = any(
+            isinstance(item, dict) and ("hosts" in item or "import_playbook" in item)
+            for item in content
+        )
+        
+        if is_playbook:
+            # Playbook format: iterate through plays
+            for play in content:
+                if isinstance(play, dict):
+                    if "tasks" in play:
+                        play["tasks"] = find_and_modify_task(play["tasks"])
+                    if "handlers" in play:
+                        play["handlers"] = find_and_modify_task(play["handlers"])
+                    if "pre_tasks" in play:
+                        play["pre_tasks"] = find_and_modify_task(play["pre_tasks"])
+                    if "post_tasks" in play:
+                        play["post_tasks"] = find_and_modify_task(play["post_tasks"])
+        else:
+            # Task file format: content is directly a list of tasks
+            modified_content = find_and_modify_task(content)
     
     if not found:
         return {"error": f"Task '{task_name}' not found in file."}

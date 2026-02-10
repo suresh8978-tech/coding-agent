@@ -15,6 +15,7 @@ Usage:
 import argparse
 import os
 import sys
+import logging
 from typing import Annotated, Any, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -23,9 +24,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
 
 # Import all tools
-from tools.file_ops import read_file, write_file, list_directory, delete_file, file_exists
+from tools.file_ops import read_file, write_file, list_directory, file_exists
 from tools.git_ops import (
     git_fetch_all,
     git_create_branch,
@@ -65,6 +68,28 @@ from tools.approval import (
 
 # Load environment variables
 load_dotenv()
+repo_path = os.getenv("REPO_PATH")
+os.chdir(repo_path)
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+def setup_logging():
+    """Configure logging to file.
+    
+    The log file is always created in the same directory as agent.py,
+    regardless of the current working directory.
+    """
+    # Get the directory where agent.py is located
+    agent_dir = os.path.dirname(os.path.abspath(__file__))
+    log_file_path = os.path.join(agent_dir, 'agent.log')
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename=log_file_path,
+        filemode='a'
+    )
 
 
 # =============================================================================
@@ -85,6 +110,9 @@ class AgentState(TypedDict):
     modification_approved: bool
     push_approved: bool
     
+    # Pending push call (blocked git_push tool call awaiting approval)
+    pending_push_call: dict | None
+    
     # Git state
     current_branch: str | None
     original_branch: str | None
@@ -93,8 +121,16 @@ class AgentState(TypedDict):
     # MOP content (if loaded)
     mop_content: dict | None
     
+    # AGENT.md content (if found in repo root)
+    agent_md_content: str | None
+    
+    # Path configuration
+    repo_path: str | None
+    mop_path: str | None
+    
     # User feedback for revisions
     user_feedback: str | None
+
 
 
 # =============================================================================
@@ -175,7 +211,6 @@ ALL_TOOLS = [
     read_file,
     write_file,
     list_directory,
-    delete_file,
     file_exists,
     # Git operations
     git_fetch_all,
@@ -222,18 +257,22 @@ ALL_TOOLS = [
 
 def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
-    # Default to Claude Haiku 3.5 - cheapest model with highest free tier limits
-    llm_name = model_name or os.getenv("LLM_NAME", "claude-3-5-haiku-latest")
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    llm_name = model_name or os.getenv("LLM_NAME", "bedrock-sonnet-4-5")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "sk-T2qOFe8dUsle-j8XF1Vw")
+    api_url = os.getenv("ANTHROPIC_API_URL", "https://llm-proxy.stg.gai.aws.tpd-soe.net")
     
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+    # Build kwargs for ChatAnthropic
+    llm_kwargs = {
+        "model": llm_name,
+        "api_key": api_key,
+        "max_tokens": 8192,
+    }
     
-    llm = ChatAnthropic(
-        model=llm_name,
-        api_key=api_key,
-        max_tokens=8192,
-    )
+    # Add base_url if a proxy URL is configured
+    if api_url:
+        llm_kwargs["base_url"] = api_url
+    
+    llm = ChatAnthropic(**llm_kwargs)
     
     return llm.bind_tools(ALL_TOOLS)
 
@@ -244,7 +283,19 @@ def agent_node(state: AgentState) -> dict:
     
     # Add system prompt if not present
     if not messages or not isinstance(messages[0], SystemMessage):
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(messages)
+        system_content = SYSTEM_PROMPT
+        
+        # Add AGENT.md context if available (highest priority)
+        agent_md_content = state.get("agent_md_content")
+        if agent_md_content:
+            system_content += build_agent_md_context(agent_md_content)
+        
+        # Add MOP context if available
+        mop_content = state.get("mop_content")
+        if mop_content:
+            system_content += build_context_message(mop_content)
+            
+        messages = [SystemMessage(content=system_content)] + list(messages)
     
     # Check if we're awaiting approval
     if state.get("awaiting_modification_approval"):
@@ -268,32 +319,67 @@ def agent_node(state: AgentState) -> dict:
     return {"messages": [response]}
 
 
-def should_continue(state: AgentState) -> Literal["tools", "approval_check", "end"]:
+def setup_node(state: AgentState) -> dict:
+    """Initialize the agent environment (paths, MOP loading, AGENT.md loading)."""
+    # Handle repo path
+    repo_path = state.get("repo_path")
+    if repo_path:
+        current_path = os.getcwd()
+        if os.path.abspath(repo_path) != current_path:
+            try:
+                os.chdir(repo_path)
+                logger.info(f"Working directory set to: {repo_path}")
+            except Exception as e:
+                logger.error(f"Error changing directory to {repo_path}: {e}")
+    
+    updates = {}
+    
+    # Handle AGENT.md loading
+    if not state.get("agent_md_content"):
+        agent_md_content = load_agent_md(repo_path)
+        if agent_md_content:
+            updates["agent_md_content"] = agent_md_content
+    
+    # Handle MOP loading
+    mop_path = state.get("mop_path")
+    if mop_path and not state.get("mop_content"):
+        try:
+            mop_content = load_mop_content(mop_path)
+            if mop_content:
+                updates["mop_content"] = mop_content
+                logger.info(f"Loaded MOP content from {mop_path}")
+        except Exception as e:
+            logger.error(f"Failed to load MOP from {mop_path}: {e}")
+            # We don't crash, just log error
+    
+    return updates
+
+
+def should_continue(state: AgentState) -> Literal["tools", "approval_check", "push_approval", "end"]:
     """Determine the next step based on current state."""
     messages = state["messages"]
     last_message = messages[-1] if messages else None
     
     # If the last message has tool calls, execute them
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
-        # Check if any tool calls are for modification tools
-        modification_tools = {
-            "modify_python_code", "add_import", "add_function",
-            "modify_task", "add_task", "modify_variable", "modify_yaml_file"
-        }
-        
-        tool_names = {tc["name"] for tc in last_message.tool_calls}
-        
-        if tool_names & modification_tools:
-            # These tools return diffs - need approval after
-            return "tools"
-        
         return "tools"
     
-    # Check if we need approval
-    if state.get("awaiting_modification_approval") or state.get("awaiting_push_approval"):
+    # Check if we need push approval (interrupt-based)
+    if state.get("awaiting_push_approval"):
+        return "push_approval"
+    
+    # Check if we need modification approval
+    if state.get("awaiting_modification_approval"):
         return "approval_check"
     
     return "end"
+
+
+def should_continue_after_push_approval(state: AgentState) -> Literal["execute_push", "agent"]:
+    """After push approval node, determine if we execute push or return to agent."""
+    if state.get("push_approved"):
+        return "execute_push"
+    return "agent"
 
 
 def approval_check_node(state: AgentState) -> dict:
@@ -351,29 +437,73 @@ def approval_check_node(state: AgentState) -> dict:
 
 
 def tools_node(state: AgentState) -> dict:
-    """Execute tool calls and process results with verbose logging."""
+    """Execute tool calls and process results with verbose logging.
+    
+    IMPORTANT: This node blocks git_push calls if push_approved is False.
+    Blocked pushes are stored in pending_push_call and awaiting_push_approval is set.
+    """
     messages = state["messages"]
     last_message = messages[-1]
     
     if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return {}
     
-    # Print tool calls being made
-    print("\n" + "-" * 60)
-    print("TOOL EXECUTION")
-    print("-" * 60)
+    # Log tool calls being made
+    logger.info("-" * 60)
+    logger.info("TOOL EXECUTION")
+    logger.info("-" * 60)
     
     for tc in last_message.tool_calls:
-        print(f"\nTool: {tc['name']}")
-        print(f"  Input: {_truncate_str(str(tc.get('args', {})), 200)}")
+        logger.info(f"Tool: {tc['name']}")
+        logger.info(f"  Input: {_truncate_str(str(tc.get('args', {})), 200)}")
     
-    tool_node = ToolNode(ALL_TOOLS)
-    result = tool_node.invoke(state)
+    # Separate git_push from other tools if not approved
+    allowed_tool_calls = []
+    blocked_push_call = None
+    blocked_messages = []
     
-    # Print tool results
-    for msg in result.get("messages", []):
+    for tc in last_message.tool_calls:
+        if tc["name"] == "git_push" and not state.get("push_approved"):
+            # Block this push - requires approval
+            logger.warning(f"Blocking unapproved git_push call: {tc['id']}")
+            blocked_push_call = tc
+            blocked_messages.append(
+                ToolMessage(
+                    tool_call_id=tc["id"],
+                    content="[BLOCKED] git_push requires explicit user approval. Please wait for user confirmation.",
+                    name=tc["name"]
+                )
+            )
+        else:
+            allowed_tool_calls.append(tc)
+    
+    # Execute allowed tools
+    result_messages = []
+    if allowed_tool_calls:
+        # Create a filtered AI message with only allowed tool calls
+        filtered_message = AIMessage(
+            content=last_message.content,
+            tool_calls=allowed_tool_calls,
+            id=last_message.id,
+            additional_kwargs=last_message.additional_kwargs,
+            response_metadata=last_message.response_metadata
+        )
+        
+        temp_messages = list(messages)
+        temp_messages[-1] = filtered_message
+        temp_state = dict(state)
+        temp_state["messages"] = temp_messages
+        
+        tool_node = ToolNode(ALL_TOOLS)
+        node_result = tool_node.invoke(temp_state)
+        result_messages = node_result.get("messages", [])
+    
+    # Combine results
+    all_result_messages = result_messages + blocked_messages
+    
+    # Log tool results
+    for msg in all_result_messages:
         if isinstance(msg, ToolMessage):
-            # Find matching tool call
             tool_name = "unknown"
             for tc in last_message.tool_calls:
                 if tc["id"] == msg.tool_call_id:
@@ -381,39 +511,147 @@ def tools_node(state: AgentState) -> dict:
                     break
             
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
-            print(f"\nOutput from {tool_name}:")
-            print(f"  {_truncate_str(output, 500)}")
+            logger.info(f"Output from {tool_name}:")
+            logger.info(f"  {_truncate_str(output, 500)}")
     
-    print("\n" + "-" * 60)
+    logger.info("-" * 60)
     
-    # Check if any modification tools were called
+    # Build updates
+    updates: dict[str, Any] = {"messages": all_result_messages}
+    
+    # Store blocked push call if any
+    if blocked_push_call:
+        updates["pending_push_call"] = blocked_push_call
+        updates["awaiting_push_approval"] = True
+    
+    # Consume push approval if it was used
+    if state.get("push_approved"):
+        for tc in allowed_tool_calls:
+            if tc["name"] == "git_push":
+                updates["push_approved"] = False
+                updates["pending_push_call"] = None
+                break
+    
+    # Check if any modification tools were called (for diff collection)
     modification_tools = {
         "modify_python_code", "add_import", "add_function",
         "modify_task", "add_task", "modify_variable", "modify_yaml_file"
     }
     
-    pending_changes = state.get("pending_changes", [])
+    pending_changes = list(state.get("pending_changes", []))
     
-    for tool_call in last_message.tool_calls:
-        if tool_call["name"] in modification_tools:
-            # Find the corresponding result
-            for msg in result.get("messages", []):
-                if isinstance(msg, ToolMessage) and msg.tool_call_id == tool_call["id"]:
-                    try:
-                        import json
-                        tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-                        if isinstance(tool_result, dict) and "diff" in tool_result:
-                            pending_changes.append(tool_result)
-                    except Exception:
-                        pass
+    for msg in result_messages:
+        if isinstance(msg, ToolMessage):
+            # Find tool name
+            tool_name = None
+            for tc in allowed_tool_calls:
+                if tc["id"] == msg.tool_call_id:
+                    tool_name = tc["name"]
+                    break
+            
+            if tool_name in modification_tools:
+                try:
+                    import json
+                    tool_result = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    if isinstance(tool_result, dict) and "diff" in tool_result:
+                        pending_changes.append(tool_result)
+                except Exception:
+                    pass
     
-    # Update state with pending changes
-    updates = result
+    # Update pending changes if changed
     if pending_changes != state.get("pending_changes", []):
         updates["pending_changes"] = pending_changes
         updates["awaiting_modification_approval"] = True
     
     return updates
+
+
+def push_approval_node(state: AgentState) -> dict:
+    """Node that uses LangGraph interrupt to request push approval from user.
+    
+    This node is reached when awaiting_push_approval is True.
+    It calls interrupt() which halts the graph and returns control to the runner.
+    """
+    pending_push = state.get("pending_push_call")
+    branch = state.get("current_branch", "unknown")
+    
+    # Build approval request message
+    push_request = format_push_request(branch, 1, [])
+    
+    logger.info("Push approval node triggered - calling interrupt")
+    
+    # This will halt execution and return to the caller
+    user_response = interrupt(push_request)
+    
+    # When resumed, user_response contains the user's input
+    logger.info(f"Interrupt resumed with user response: {user_response}")
+    
+    response_lower = str(user_response).lower().strip()
+    
+    if response_lower in ["push", "yes", "proceed", "ok", "go ahead", "y"]:
+        return {
+            "push_approved": True,
+            "awaiting_push_approval": False,
+        }
+    elif response_lower in ["cancel", "no", "skip", "abort", "n"]:
+        return {
+            "push_approved": False,
+            "awaiting_push_approval": False,
+            "pending_push_call": None,
+            "messages": [
+                ToolMessage(
+                    tool_call_id=pending_push["id"] if pending_push else "cancelled",
+                    content="Push cancelled by user.",
+                    name="git_push"
+                )
+            ]
+        }
+    else:
+        # Treat any other response as feedback/cancel
+        return {
+            "push_approved": False,
+            "awaiting_push_approval": False,
+            "pending_push_call": None,
+            "user_feedback": user_response,
+        }
+
+
+def execute_push_node(state: AgentState) -> dict:
+    """Execute the pending git_push after approval.
+    
+    This node runs the blocked git_push call now that it's approved.
+    """
+    pending_push = state.get("pending_push_call")
+    
+    if not pending_push:
+        logger.warning("execute_push_node called but no pending_push_call found")
+        return {}
+    
+    logger.info(f"Executing approved git_push: {pending_push}")
+    
+    # Create a minimal AI message with just the push call
+    push_message = AIMessage(
+        content="",
+        tool_calls=[pending_push]
+    )
+    
+    temp_state = dict(state)
+    temp_state["messages"] = [push_message]
+    
+    tool_node = ToolNode([git_push])
+    result = tool_node.invoke(temp_state)
+    
+    # Log result
+    for msg in result.get("messages", []):
+        if isinstance(msg, ToolMessage):
+            logger.info(f"git_push result: {msg.content}")
+    
+    return {
+        "messages": result.get("messages", []),
+        "push_approved": False,
+        "pending_push_call": None,
+        "awaiting_push_approval": False,
+    }
 
 
 def _truncate_str(s: str, max_len: int) -> str:
@@ -428,24 +666,34 @@ def _truncate_str(s: str, max_len: int) -> str:
 # =============================================================================
 
 def create_graph():
-    """Create the LangGraph workflow."""
+    """Create the LangGraph workflow with interrupt-based push approval.
+    
+    Uses MemorySaver checkpointer to enable interrupt/resume functionality.
+    """
     workflow = StateGraph(AgentState)
     
     # Add nodes
+    workflow.add_node("setup", setup_node)
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tools_node)
     workflow.add_node("approval_check", approval_check_node)
+    workflow.add_node("push_approval", push_approval_node)
+    workflow.add_node("execute_push", execute_push_node)
     
     # Set entry point
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("setup")
     
     # Add edges
+    workflow.add_edge("setup", "agent")
+    
+    # Main agent routing
     workflow.add_conditional_edges(
         "agent",
         should_continue,
         {
             "tools": "tools",
             "approval_check": "approval_check",
+            "push_approval": "push_approval",
             "end": END,
         }
     )
@@ -453,7 +701,20 @@ def create_graph():
     workflow.add_edge("tools", "agent")
     workflow.add_edge("approval_check", "agent")
     
-    return workflow.compile()
+    # Push approval flow
+    workflow.add_conditional_edges(
+        "push_approval",
+        should_continue_after_push_approval,
+        {
+            "execute_push": "execute_push",
+            "agent": "agent",
+        }
+    )
+    workflow.add_edge("execute_push", "agent")
+    
+    # Compile with checkpointer to enable interrupt/resume
+    checkpointer = MemorySaver()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # =============================================================================
@@ -466,18 +727,44 @@ def load_mop_content(mop_path: str) -> dict | None:
         return None
     
     from tools.mop_parser import read_mop_document
-    print(f"Loading MOP document: {mop_path}")
+    logger.info(f"Loading MOP document: {mop_path}")
     result = read_mop_document.invoke({"path": mop_path})
     
     if isinstance(result, dict) and "error" in result:
-        print(f"Error loading MOP: {result['error']}")
+        logger.error(f"Error loading MOP: {result['error']}")
         return None
     
-    print(f"MOP loaded successfully. {result.get('stats', {}).get('word_count', 0)} words.")
+    logger.info(f"MOP loaded successfully. {result.get('stats', {}).get('word_count', 0)} words.")
     return result
 
 
-def create_initial_state(mop_content: dict | None = None) -> AgentState:
+def load_agent_md(repo_path: str | None = None) -> str | None:
+    """Load AGENT.md content from the repo root directory.
+    
+    Args:
+        repo_path: Path to the repository root. If None, uses current directory.
+        
+    Returns:
+        The content of AGENT.md if it exists, None otherwise.
+    """
+    base_path = repo_path or os.getcwd()
+    agent_md_path = os.path.join(base_path, "AGENT.md")
+    
+    if not os.path.isfile(agent_md_path):
+        logger.info(f"AGENT.md not found at {agent_md_path}")
+        return None
+    
+    try:
+        with open(agent_md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        logger.info(f"Loaded AGENT.md from {agent_md_path} ({len(content)} chars)")
+        return content
+    except Exception as e:
+        logger.error(f"Error reading AGENT.md: {e}")
+        return None
+
+
+def create_initial_state(repo_path: str | None = None, mop_path: str | None = None) -> AgentState:
     """Create initial agent state."""
     return {
         "messages": [],
@@ -486,12 +773,41 @@ def create_initial_state(mop_content: dict | None = None) -> AgentState:
         "awaiting_push_approval": False,
         "modification_approved": False,
         "push_approved": False,
+        "pending_push_call": None,
         "current_branch": None,
         "original_branch": None,
         "branch_created": False,
-        "mop_content": mop_content,
+        "mop_content": None,
+        "agent_md_content": None,
         "user_feedback": None,
+        "repo_path": repo_path,
+        "mop_path": mop_path,
     }
+
+
+def build_agent_md_context(agent_md_content: str | None) -> str:
+    """Build context message with AGENT.md instructions.
+    
+    AGENT.md contains project-specific instructions that take highest priority
+    for all code analysis and modifications.
+    """
+    if not agent_md_content:
+        return ""
+    
+    context = "\n\n" + "=" * 60 + "\n"
+    context += "PROJECT-SPECIFIC INSTRUCTIONS (AGENT.md)\n"
+    context += "=" * 60 + "\n"
+    context += "\nThe following instructions were found in AGENT.md in the repository root.\n"
+    context += "These instructions MUST be followed for ALL interactions with this codebase.\n"
+    context += "When conflicting with general guidelines, AGENT.md takes precedence.\n"
+    context += "\n--- AGENT.md ---\n"
+    context += agent_md_content[:30000]  # Limit to 30k chars
+    if len(agent_md_content) > 30000:
+        context += "\n... (content truncated)"
+    context += "\n--- END AGENT.md ---\n"
+    context += "=" * 60 + "\n"
+    
+    return context
 
 
 def build_context_message(mop_content: dict | None) -> str:
@@ -513,21 +829,27 @@ def build_context_message(mop_content: dict | None) -> str:
     return context
 
 
-def run_single_query(query: str, mop_content: dict | None = None) -> str:
-    """Run a single query in non-interactive mode."""
+def run_single_query(query: str, repo_path: str | None = None, mop_path: str | None = None) -> str:
+    """Run a single query in non-interactive mode.
+    
+    Note: If the query triggers a git_push, the push will be blocked
+    and the function will return a message asking for approval.
+    Non-interactive mode cannot approve pushes.
+    """
+    import uuid
+    from langgraph.errors import GraphInterrupt
+    
+    setup_logging()
     graph = create_graph()
-    state = create_initial_state(mop_content)
+    state = create_initial_state(repo_path, mop_path)
+    state["messages"] = [HumanMessage(content=query)]
     
-    # Build the query with MOP context if available
-    full_query = query
-    if mop_content:
-        context = build_context_message(mop_content)
-        full_query = context + "\n\nUser Query: " + query
-    
-    state["messages"] = [HumanMessage(content=full_query)]
+    # Generate unique thread ID for this run
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
     
     try:
-        result = graph.invoke(state, {"recursion_limit": 100})
+        result = graph.invoke(state, config)
         
         # Extract the last AI message
         for msg in reversed(result["messages"]):
@@ -535,38 +857,40 @@ def run_single_query(query: str, mop_content: dict | None = None) -> str:
                 return msg.content
         
         return "No response generated."
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "credit balance is too low" in error_msg:
-            return "Error: Anthropic API credit balance is too low. Add credits at https://console.anthropic.com/settings/billing"
-        elif "rate_limit" in error_msg.lower():
-            return "Error: Rate limit reached. Please wait and try again."
-        else:
-            return f"Error: {e}"
+    
+    except GraphInterrupt as e:
+        # Push approval required but we can't get it in non-interactive mode
+        interrupt_value = e.args[0] if e.args else "Push approval required"
+        return f"PUSH APPROVAL REQUIRED\n\n{interrupt_value}\n\nNote: Cannot approve pushes in non-interactive mode. Run in interactive mode to approve."
 
 
-def run_interactive(mop_content: dict | None = None):
-    """Run the agent in interactive mode."""
+def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
+    """Run the agent in interactive mode with interrupt-based push approval."""
+    import uuid
+    from langgraph.errors import GraphInterrupt
+    
+    setup_logging()
     graph = create_graph()
-    state = create_initial_state(mop_content)
+    state = create_initial_state(repo_path, mop_path)
+    
+    # Generate unique thread ID for this session
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
     
     print("=" * 60)
     print("Coding Agent with Ansible & Python Capabilities")
     print("=" * 60)
-    if mop_content:
-        print(f"MOP loaded: {mop_content.get('title', 'Untitled')}")
     print("Commands:")
     print("  - Type your request to interact with the agent")
     print("  - 'approve' to approve pending changes")
     print("  - 'reject' to reject pending changes")
     print("  - 'push' to approve pushing to remote")
+    print("  - 'cancel' to cancel a push request")
     print("  - 'quit' or 'exit' to exit")
     print("=" * 60)
     print()
     
-    # Add MOP context to first message if available
-    mop_context = build_context_message(mop_content) if mop_content else ""
+    interrupted = False  # Track if we're in an interrupted state
     
     try:
         while True:
@@ -582,16 +906,16 @@ def run_interactive(mop_content: dict | None = None):
                 print("Goodbye!")
                 break
             
-            # Add MOP context to first user message
-            if mop_context and len(state["messages"]) == 0:
-                full_input = mop_context + "\n\nUser Query: " + user_input
-            else:
-                full_input = user_input
-            
-            state["messages"] = list(state["messages"]) + [HumanMessage(content=full_input)]
-            
             try:
-                result = graph.invoke(state, {"recursion_limit": 100})
+                if interrupted:
+                    # Resume from interrupt with user's response
+                    result = graph.invoke(Command(resume=user_input), config)
+                    interrupted = False
+                else:
+                    # Normal invocation
+                    state["messages"] = list(state["messages"]) + [HumanMessage(content=user_input)]
+                    result = graph.invoke(state, config)
+                
                 state = result
                 
                 # Print the last AI message
@@ -604,31 +928,20 @@ def run_interactive(mop_content: dict | None = None):
                 if state.get("awaiting_modification_approval") and state.get("pending_changes"):
                     print("\n" + format_changes_for_display(state["pending_changes"]))
                     print("\nType 'approve' to apply changes or describe what you'd like to change.\n")
-                
-                # Show push request if needed
-                if state.get("awaiting_push_approval"):
-                    branch = state.get("current_branch", "unknown")
-                    print("\n" + format_push_request(branch, 1, []))
-                    print()
                     
+            except GraphInterrupt as e:
+                # Push approval interrupt triggered
+                interrupted = True
+                interrupt_value = e.args[0] if e.args else "Push approval required"
+                print(f"\n{interrupt_value}")
+                print("\nType 'push' to push, or 'cancel' to abort.\n")
+                
             except Exception as e:
                 error_msg = str(e)
-                if "credit balance is too low" in error_msg or "invalid_request_error" in error_msg:
-                    print("\n" + "=" * 60)
-                    print("ANTHROPIC API BILLING ERROR")
-                    print("=" * 60)
-                    print("Your Anthropic API credit balance is too low.")
-                    print("\nTo fix this:")
-                    print("1. Go to: https://console.anthropic.com/settings/billing")
-                    print("2. Add credits or upgrade your plan")
-                    print("3. Then run the agent again")
-                    print("=" * 60 + "\n")
-                elif "rate_limit" in error_msg.lower():
-                    print("\nRate limit reached. Please wait a moment and try again.\n")
-                else:
-                    print(f"\nError: {e}\n")
-                    import traceback
-                    traceback.print_exc()
+                print(f"\nError: {error_msg}\n")
+                import traceback
+                traceback.print_exc()
+                interrupted = False  # Reset interrupt state on error
     
     except KeyboardInterrupt:
         print("\n\nInterrupted. Goodbye!")
@@ -673,23 +986,14 @@ if __name__ == "__main__":
     load_dotenv()
     args = parse_args()
     
-    # Set repo path
+    # Set repo path defaults (but don't change dir yet)
     repo_path = args.repo or os.getenv("REPO_PATH")
-    if repo_path:
-        os.chdir(repo_path)
-        print(f"Working directory: {repo_path}")
-    
-    # Load MOP if provided
-    mop_content = None
-    if args.mop:
-        mop_content = load_mop_content(args.mop)
     
     # Run in appropriate mode
     if args.query:
         # Non-interactive mode
-        response = run_single_query(args.query, mop_content)
+        response = run_single_query(args.query, repo_path, args.mop)
         print(response)
     else:
         # Interactive mode
-        run_interactive(mop_content)
-
+        run_interactive(repo_path, args.mop)
