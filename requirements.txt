@@ -1,3 +1,6 @@
+langgraph==1.0.5
+langchain-litellm>=0.2.0
+litellm>=1.0.0
 python-docx>=1.1.0
 ast-grep-py>=0.35.0
 python-dotenv>=1.0.0
