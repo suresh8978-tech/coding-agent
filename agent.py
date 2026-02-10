@@ -19,7 +19,7 @@ import logging
 from typing import Annotated, Any, Literal, TypedDict
 
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
+from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -257,22 +257,22 @@ ALL_TOOLS = [
 
 def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
-    llm_name = model_name or os.getenv("LLM_NAME", "bedrock-sonnet-4-5")
+    llm_name = model_name or os.getenv("LLM_NAME", "anthropic/bedrock-sonnet-4-5")
     api_key = os.getenv("ANTHROPIC_API_KEY", "sk-T2qOFe8dUsle-j8XF1Vw")
     api_url = os.getenv("ANTHROPIC_API_URL", "https://llm-proxy.stg.gai.aws.tpd-soe.net")
     
-    # Build kwargs for ChatAnthropic
+    # Build kwargs for ChatLiteLLM
     llm_kwargs = {
         "model": llm_name,
         "api_key": api_key,
         "max_tokens": 8192,
     }
     
-    # Add base_url if a proxy URL is configured
+    # Add api_base if a proxy URL is configured
     if api_url:
-        llm_kwargs["base_url"] = api_url
+        llm_kwargs["api_base"] = api_url
     
-    llm = ChatAnthropic(**llm_kwargs)
+    llm = ChatLiteLLM(**llm_kwargs)
     
     return llm.bind_tools(ALL_TOOLS)
 
