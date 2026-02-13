@@ -265,7 +265,8 @@ def create_agent(model_name: str | None = None):
     llm_kwargs = {
         "model": llm_name,
         "api_key": api_key,
-        "max_tokens": 8192,
+        "max_tokens": 4096,
+        "drop_params": True,
     }
     
     # Add api_base if a proxy URL is configured
@@ -801,8 +802,8 @@ def build_agent_md_context(agent_md_content: str | None) -> str:
     context += "These instructions MUST be followed for ALL interactions with this codebase.\n"
     context += "When conflicting with general guidelines, AGENT.md takes precedence.\n"
     context += "\n--- AGENT.md ---\n"
-    context += agent_md_content[:30000]  # Limit to 30k chars
-    if len(agent_md_content) > 30000:
+    context += agent_md_content[:15000]  # Limit to 15k chars
+    if len(agent_md_content) > 15000:
         context += "\n... (content truncated)"
     context += "\n--- END AGENT.md ---\n"
     context += "=" * 60 + "\n"
@@ -820,8 +821,8 @@ def build_context_message(mop_content: dict | None) -> str:
     context += f"Sections: {mop_content.get('stats', {}).get('section_count', 0)}\n"
     context += f"Tables: {mop_content.get('stats', {}).get('table_count', 0)}\n"
     context += "\n--- MOP FULL CONTENT ---\n"
-    context += mop_content.get("full_text", "")[:50000]  # Limit to 50k chars
-    if len(mop_content.get("full_text", "")) > 50000:
+    context += mop_content.get("full_text", "")[:30000]  # Limit to 30k chars
+    if len(mop_content.get("full_text", "")) > 30000:
         context += "\n... (content truncated)"
     context += "\n--- END MOP CONTENT ---\n"
     context += "\nPrioritize responses based on this MOP document when applicable.\n"
