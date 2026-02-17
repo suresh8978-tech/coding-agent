@@ -1,4 +1,13 @@
-def extract_failed_tasks_only(self, content: str) -> List[Dict[str, Any]]:
+from typing import List, Dict, Any
+
+class AnsibleLogExtractor:
+    def __init__(self, chunker):
+        self.chunker = chunker
+
+    def chunk_log_content(self, content: str):
+        return self.chunker.chunk_log_content(content)
+
+    def extract_failed_tasks_only(self, content: str) -> List[Dict[str, Any]]:
         """Get only failed tasks for quick error analysis"""
         chunks = self.chunk_log_content(content)
         return [c for c in chunks if c.get('status') == 'failed']
