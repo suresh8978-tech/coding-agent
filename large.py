@@ -1,8 +1,8 @@
 from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.prompts import ChatPromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate
 
 
 # ============================================================
