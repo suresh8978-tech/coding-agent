@@ -1,6 +1,7 @@
 from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
+import os
+from langchain_litellm import ChatLiteLLM
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -29,8 +30,22 @@ class FileState(TypedDict):
 # ============================================================
 
 class AgenticFileReader:
-    def __init__(self, model: str = "gpt-4"):
-        self.llm = ChatOpenAI(model=model, temperature=0)
+    def __init__(self, model: str | None = None):
+        # Use env vars consistent with agent.py
+        llm_name = model or os.getenv("LLM_NAME", "bedrock-sonnet-4-5")
+        api_key = os.getenv("LITELLM_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
+        api_url = os.getenv("LITELLM_API_BASE", os.getenv("ANTHROPIC_API_URL", ""))
+        
+        llm_kwargs = {
+            "model": llm_name,
+            "api_key": api_key,
+            "max_tokens": 4096,
+            "drop_params": True,
+        }
+        if api_url:
+            llm_kwargs["api_base"] = api_url
+
+        self.llm = ChatLiteLLM(**llm_kwargs)
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=3000,
             chunk_overlap=150

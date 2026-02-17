@@ -35,6 +35,7 @@ from tools.approval import (
     create_modification_plan,
     generate_unified_diff,
 )
+from tools.integrated_tools import query_large_file, query_ansible_log, extract_ansible_metrics
 
 __all__ = [
     # File operations
@@ -83,4 +84,8 @@ __all__ = [
     "PendingChange",
     "create_modification_plan",
     "generate_unified_diff",
+    # Advanced Analysis
+    "query_large_file",
+    "query_ansible_log",
+    "extract_ansible_metrics",
 ]

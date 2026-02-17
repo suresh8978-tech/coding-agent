@@ -65,6 +65,7 @@ from tools.approval import (
     format_changes_for_display,
     format_push_request,
 )
+from tools.integrated_tools import query_large_file, query_ansible_log, extract_ansible_metrics
 
 # Load environment variables
 load_dotenv()
@@ -147,6 +148,10 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 5. **Ansible Analysis**: Analyze Ansible projects, playbooks, roles, tasks, and variables
 6. **Python Coding**: Modify Python code, add imports, add functions
 7. **Ansible Coding**: Modify tasks, add tasks, update variables, modify YAML files
+8. **Advanced Analysis**:
+   - Use `query_large_file` for documents too large for standard reading
+   - Use `query_ansible_log` to analyze Ansible execution logs (failures, changes, summaries)
+   - Use `extract_ansible_metrics` for structured data from logs
 
 ## Workflow Rules (CRITICAL):
 
@@ -248,6 +253,10 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
+    # Advanced Analysis
+    query_large_file,
+    query_ansible_log,
+    extract_ansible_metrics,
 ]
 
 
