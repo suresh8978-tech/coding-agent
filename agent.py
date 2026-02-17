@@ -19,7 +19,7 @@ import logging
 from typing import Annotated, Any, Literal, TypedDict
 
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
+from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -189,11 +189,31 @@ When a MOP (Method of Procedure) document is loaded:
 - If asked to implement changes, follow the MOP procedures exactly
 - Cite the MOP section when explaining actions
 
+## Large File Handling (CRITICAL):
+Files with more than 200 lines MUST be read and written in chunks — never in a single operation.
+
+### Reading large files:
+- The `read_file` tool automatically returns the first 200-line chunk with metadata when a large file is detected
+- The metadata header tells you: total lines, current chunk number, total chunks, and the exact `read_file` call needed for the next chunk
+- **Always read ALL chunks before drawing conclusions** about a large file's content or making modifications
+- After each chunk, immediately call `read_file` again with the indicated `start_line` and `end_line` for the next chunk until `[END OF FILE]` is shown
+- Summarize findings incrementally as you process each chunk; do not wait until all chunks are done to report progress
+
+### Writing / editing large files:
+The `write_file` tool supports three modes for chunked edits:
+- **`mode='write'`** (default): creates or fully overwrites the file — use for the **first chunk only** or for small files (≤200 lines)
+- **`mode='append'`**: appends content to the end of the file — use for **every subsequent chunk** after the first
+- **`mode='patch'`**: replaces only lines `start_line`..`end_line` (1-based, inclusive) — use to **surgically edit a section** of a large file without rewriting it entirely
+
+Rules:
+- For new/rewritten files >200 lines: write the first 200-line chunk with `mode='write'`, then each additional chunk with `mode='append'`
+- For targeted edits to existing large files: prefer `mode='patch'` with the exact line range instead of rewriting the whole file
+- Never pass more than ~200 lines of content in a single `write_file` call
+
 ## Result Filtering (CRITICAL):
 When dealing with large result sets:
 - If a directory listing returns more than 30 items, focus on the most relevant ones
 - If a search returns more than 20 matches, summarize patterns and show only key examples
-- If file content is too long (>500 lines), analyze in sections
 - NEVER try to process all items when there are too many - filter and prioritize
 - When results are filtered, clearly state what was included and what was skipped
 - For large codebases, work incrementally: analyze structure first, then dive into specifics
@@ -257,22 +277,23 @@ ALL_TOOLS = [
 
 def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
-    llm_name = model_name or os.getenv("LLM_NAME", "bedrock-sonnet-4-5")
-    api_key = os.getenv("ANTHROPIC_API_KEY", "sk-T2qOFe8dUsle-j8XF1Vw")
-    api_url = os.getenv("ANTHROPIC_API_URL", "https://llm-proxy.stg.gai.aws.tpd-soe.net")
+    llm_name = model_name or os.getenv("LLM_NAME", "claude-haiku-4-5-20251001")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_url = os.getenv("ANTHROPIC_API_URL")
     
-    # Build kwargs for ChatAnthropic
+    # Build kwargs for ChatLiteLLM
     llm_kwargs = {
         "model": llm_name,
         "api_key": api_key,
-        "max_tokens": 8192,
+        "max_tokens": 4096,
+        "drop_params": True,
     }
     
-    # Add base_url if a proxy URL is configured
+    # Add api_base if a proxy URL is configured
     if api_url:
-        llm_kwargs["base_url"] = api_url
+        llm_kwargs["api_base"] = api_url
     
-    llm = ChatAnthropic(**llm_kwargs)
+    llm = ChatLiteLLM(**llm_kwargs)
     
     return llm.bind_tools(ALL_TOOLS)
 
@@ -801,8 +822,8 @@ def build_agent_md_context(agent_md_content: str | None) -> str:
     context += "These instructions MUST be followed for ALL interactions with this codebase.\n"
     context += "When conflicting with general guidelines, AGENT.md takes precedence.\n"
     context += "\n--- AGENT.md ---\n"
-    context += agent_md_content[:30000]  # Limit to 30k chars
-    if len(agent_md_content) > 30000:
+    context += agent_md_content[:15000]  # Limit to 15k chars
+    if len(agent_md_content) > 15000:
         context += "\n... (content truncated)"
     context += "\n--- END AGENT.md ---\n"
     context += "=" * 60 + "\n"
@@ -820,8 +841,8 @@ def build_context_message(mop_content: dict | None) -> str:
     context += f"Sections: {mop_content.get('stats', {}).get('section_count', 0)}\n"
     context += f"Tables: {mop_content.get('stats', {}).get('table_count', 0)}\n"
     context += "\n--- MOP FULL CONTENT ---\n"
-    context += mop_content.get("full_text", "")[:50000]  # Limit to 50k chars
-    if len(mop_content.get("full_text", "")) > 50000:
+    context += mop_content.get("full_text", "")[:30000]  # Limit to 30k chars
+    if len(mop_content.get("full_text", "")) > 30000:
         context += "\n... (content truncated)"
     context += "\n--- END MOP CONTENT ---\n"
     context += "\nPrioritize responses based on this MOP document when applicable.\n"

@@ -3,3 +3,6 @@ ansible-content-capture
 awx
 README.md
 coding_agent
+*__pycache__*
+*.log
+.claude
