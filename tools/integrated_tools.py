@@ -47,11 +47,7 @@ def extract_ansible_metrics(
     
     Args:
         file_path: Path to the log file
-        extraction_type: One of:
-            - 'failed_tasks': List of all failed tasks
-            - 'timeline': Chronological timeline of execution
-            - 'by_host:hostname': Tasks affecting a specific host
-            - 'by_play:playname': Tasks in a specific play
+        extraction_type: The type of extraction to perform. Options: 'failed_tasks', 'timeline', 'by_host:<hostname>', 'by_play:<playname>'.
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
