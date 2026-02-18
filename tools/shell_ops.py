@@ -41,10 +41,10 @@ def run_shell_command(command: str, working_dir: str = "") -> str:
         
         output = "\n".join(output_parts) if output_parts else "(no output)"
         
-        # Limit output size to prevent bypassing read_file chunking
-        max_output = 2000
+        # Limit output size to avoid overwhelming the LLM
+        max_output = 10000
         if len(output) > max_output:
-            output = output[:max_output] + f"\n... (output truncated, {len(output)} total chars. Use read_file tool to read content.)"
+            output = output[:max_output] + f"\n... (output truncated, {len(output)} total chars)"
         
         return f"Exit code: {result.returncode}\n{output}"
         
