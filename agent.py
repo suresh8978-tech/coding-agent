@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 import logging
+import time
 from typing import Annotated, Any, Literal, TypedDict
 
 from dotenv import load_dotenv
@@ -131,6 +132,9 @@ class AgentState(TypedDict):
     # User feedback for revisions
     user_feedback: str | None
 
+    # Flag set when running in non-interactive (--query) mode
+    non_interactive: bool
+
 
 
 # =============================================================================
@@ -198,6 +202,11 @@ Files with more than 200 lines MUST be read and written in chunks — never in a
 - **Always read ALL chunks before drawing conclusions** about a large file's content or making modifications
 - After each chunk, immediately call `read_file` again with the indicated `start_line` and `end_line` for the next chunk until `[END OF FILE]` is shown
 - Summarize findings incrementally as you process each chunk; do not wait until all chunks are done to report progress
+
+### Forbidden Commands:
+- **NEVER** use `run_shell_command` with `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or similar to read file content.
+- **ALWAYS** use the `read_file` tool. It is the ONLY allowed way to read files.
+- You may use `grep` ONLY for searching for file names (e.g. `find . -name ...`) or checking for existence of a pattern across MANY files (e.g. `grep -l "pattern" -R .`), but NOT for reading content or analyzing code structure of a specific file.
 
 ### Writing / editing large files:
 The `write_file` tool supports three modes for chunked edits:
@@ -333,10 +342,39 @@ def agent_node(state: AgentState) -> dict:
         context = f"\n\n[SYSTEM: Changes have been applied. Awaiting push approval for branch '{branch}'.]\n"
         messages = messages + [SystemMessage(content=context)]
     
-    # Get LLM response
+    # Append thoroughness hint when running non-interactively (single-shot query)
+    if state.get("non_interactive"):
+        hint = (
+            "\n\n[SYSTEM: You are running in non-interactive mode (single query). "
+            "You MUST be exhaustive: use multiple tools and search strategies before "
+            "concluding that something does not exist. Try find_files, search_in_files, "
+            "find_classes, find_functions, and scan_ansible_project as appropriate. "
+            "Do NOT give up after one or two tool calls.]\n"
+        )
+        messages = messages + [SystemMessage(content=hint)]
+
+    # Get LLM response with rate-limit retry (exponential backoff, max 5 attempts)
     agent = create_agent()
-    response = agent.invoke(messages)
-    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = agent.invoke(messages)
+            break
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e):
+                if attempt < max_retries - 1:
+                    wait = 60 * (2 ** attempt)
+                    logger.warning(
+                        f"Rate limit hit (attempt {attempt + 1}/{max_retries}), "
+                        f"waiting {wait}s before retry..."
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error("Rate limit exceeded after all retries.")
+                    raise
+            else:
+                raise
+
     return {"messages": [response]}
 
 
@@ -803,6 +841,7 @@ def create_initial_state(repo_path: str | None = None, mop_path: str | None = No
         "user_feedback": None,
         "repo_path": repo_path,
         "mop_path": mop_path,
+        "non_interactive": False,
     }
 
 
@@ -863,6 +902,7 @@ def run_single_query(query: str, repo_path: str | None = None, mop_path: str | N
     setup_logging()
     graph = create_graph()
     state = create_initial_state(repo_path, mop_path)
+    state["non_interactive"] = True
     state["messages"] = [HumanMessage(content=query)]
     
     # Generate unique thread ID for this run
