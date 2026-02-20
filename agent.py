@@ -290,7 +290,7 @@ ALL_TOOLS = [
 
 def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
-    llm_name = model_name or os.getenv("LLM_NAME", "claude-haiku-4-5-20251001")
+    llm_name = model_name or os.getenv("LLM_NAME", "anthropic/claude-3-haiku-20240307")
     api_key = os.getenv("ANTHROPIC_API_KEY")
     api_url = os.getenv("ANTHROPIC_API_URL")
     
@@ -564,7 +564,8 @@ def tools_node(state: AgentState) -> dict:
     # Combine results
     all_result_messages = result_messages + blocked_messages
     
-    # Log tool results
+    # Log tool results and detect errors
+    tool_errors: list[str] = []
     for msg in all_result_messages:
         if isinstance(msg, ToolMessage):
             tool_name = "unknown"
@@ -576,7 +577,33 @@ def tools_node(state: AgentState) -> dict:
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
             logger.info(f"Output from {tool_name}:")
             logger.info(f"  {_truncate_str(output, 500)}")
-    
+
+            # Detect error strings produced by safe_tool or existing handlers.
+            # Skip the [BLOCKED] pseudo-error — that is handled separately.
+            if not output.startswith("[BLOCKED]") and (
+                output.startswith("Error in tool")
+                or output.startswith("Error:")
+                or output.startswith("Error ")
+            ):
+                logger.warning(f"Tool error detected from '{tool_name}': {output[:200]}")
+                tool_errors.append(f"**{tool_name}**: {output}")
+
+    # If any tool returned an error, inject a system nudge so the LLM is
+    # explicitly instructed to surface the error to the user verbatim.
+    if tool_errors:
+        error_summary = "\n".join(tool_errors)
+        all_result_messages.append(
+            SystemMessage(
+                content=(
+                    "[SYSTEM CRITICAL: One or more tools returned errors. "
+                    "Before continuing, you MUST output a message to the user starting with "
+                    "':warning: **TOOL ERROR**' and then paste the exact error message(s) below. "
+                    "Do not hide or summarize the error.]\n\n"
+                    + error_summary
+                )
+            )
+        )
+
     logger.info("-" * 60)
     
     # Build updates
@@ -857,8 +884,8 @@ def create_graph():
         {"agent": "agent", "error_handler": "error_handler"},
     )
 
-    # --- error_handler always returns to agent so the user can continue ---
-    workflow.add_edge("error_handler", "agent")
+    # --- error_handler returns to END so the graph pauses and waits for user input ---
+    workflow.add_edge("error_handler", END)
 
     # --- Compile ---
     checkpointer = MemorySaver()
