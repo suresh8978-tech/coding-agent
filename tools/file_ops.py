@@ -3,12 +3,16 @@
 import os
 from pathlib import Path
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
-CHUNK_SIZE = 200  # Lines per chunk for large file processing
+# Lines per chunk when reading large files.
+# Override via FILE_CHUNK_SIZE in .env  (optimal for claude-sonnet-4-5: 500).
+CHUNK_SIZE = int(os.environ.get("FILE_CHUNK_SIZE", 500))
 
 
 @tool
+@safe_tool
 def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
     """Read the contents of a file, with optional line range for chunked reading.
 
@@ -80,6 +84,7 @@ def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
 
 
 @tool
+@safe_tool
 def write_file(
     path: str,
     content: str,
@@ -153,6 +158,7 @@ def write_file(
 
 
 @tool
+@safe_tool
 def list_directory(path: str, max_items: int = 50) -> str:
     """List the contents of a directory.
     
@@ -211,6 +217,7 @@ def list_directory(path: str, max_items: int = 50) -> str:
 
 
 @tool
+@safe_tool
 def file_exists(path: str) -> str:
     """Check if a file or directory exists.
     

@@ -3,9 +3,11 @@
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 @tool
+@safe_tool
 def modify_task(path: str, task_name: str, new_spec: dict) -> dict[str, Any]:
     """Modify an existing task in an Ansible playbook or task file.
     
@@ -93,6 +95,7 @@ def modify_task(path: str, task_name: str, new_spec: dict) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def add_task(path: str, task_spec: dict, after_task: str = "") -> dict[str, Any]:
     """Add a new task to an Ansible playbook or task file.
     
@@ -162,6 +165,7 @@ def add_task(path: str, task_spec: dict, after_task: str = "") -> dict[str, Any]
 
 
 @tool
+@safe_tool
 def modify_variable(path: str, var_name: str, new_value: Any) -> dict[str, Any]:
     """Modify a variable in an Ansible vars or defaults file.
     
@@ -211,6 +215,7 @@ def modify_variable(path: str, var_name: str, new_value: Any) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def modify_yaml_file(path: str, modifications: dict) -> dict[str, Any]:
     """Make arbitrary modifications to a YAML file.
     

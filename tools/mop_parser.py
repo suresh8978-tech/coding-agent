@@ -3,9 +3,11 @@
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 @tool
+@safe_tool
 def read_mop_document(path: str) -> dict[str, Any]:
     """Read and parse a MOP document (DOCX format, up to 90 pages).
     

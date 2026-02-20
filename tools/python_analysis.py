@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 def _get_sg_root(source: str, language: str = "python"):
@@ -15,6 +16,7 @@ def _get_sg_root(source: str, language: str = "python"):
 
 
 @tool
+@safe_tool
 def analyze_python_file(path: str) -> dict[str, Any]:
     """Analyze a Python file's structure using ast-grep.
     
@@ -107,6 +109,7 @@ def analyze_python_file(path: str) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def find_python_pattern(path: str, pattern: str) -> list[dict[str, Any]]:
     """Find code matching a pattern in a Python file using ast-grep.
     
@@ -146,6 +149,7 @@ def find_python_pattern(path: str, pattern: str) -> list[dict[str, Any]]:
 
 
 @tool
+@safe_tool
 def find_functions(path: str) -> list[dict[str, Any]]:
     """Find all function definitions in a Python file.
     
@@ -187,6 +191,7 @@ def find_functions(path: str) -> list[dict[str, Any]]:
 
 
 @tool
+@safe_tool
 def find_classes(path: str) -> list[dict[str, Any]]:
     """Find all class definitions in a Python file.
     
@@ -241,6 +246,7 @@ def find_classes(path: str) -> list[dict[str, Any]]:
 
 
 @tool
+@safe_tool
 def find_imports(path: str) -> list[dict[str, Any]]:
     """Find all import statements in a Python file.
     

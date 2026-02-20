@@ -4,9 +4,11 @@ import subprocess
 import os
 from typing import Optional
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 @tool
+@safe_tool
 def run_shell_command(command: str, working_dir: str = "") -> str:
     """Execute a shell command and return the output.
     
@@ -55,6 +57,7 @@ def run_shell_command(command: str, working_dir: str = "") -> str:
 
 
 @tool
+@safe_tool
 def find_files(pattern: str, directory: str = ".", max_results: int = 50) -> str:
     """Find files matching a pattern using find command.
     
@@ -99,7 +102,8 @@ def find_files(pattern: str, directory: str = ".", max_results: int = 50) -> str
         return f"Error searching files: {str(e)}"
 
 
-@tool  
+@tool
+@safe_tool
 def search_in_files(search_term: str, file_pattern: str = "*", directory: str = ".") -> str:
     """Search for a term within files using grep.
     

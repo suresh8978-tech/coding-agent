@@ -17,7 +17,8 @@ import os
 import sys
 import logging
 import time
-from typing import Annotated, Any, Literal, TypedDict
+from functools import wraps
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
 from langchain_litellm import ChatLiteLLM
@@ -134,6 +135,9 @@ class AgentState(TypedDict):
 
     # Flag set when running in non-interactive (--query) mode
     non_interactive: bool
+
+    # Holds an error message when a node raises an unhandled exception
+    error: Optional[str]
 
 
 
@@ -721,57 +725,142 @@ def _truncate_str(s: str, max_len: int) -> str:
 
 
 # =============================================================================
+# Exception Handling Infrastructure
+# =============================================================================
+
+def catch_exceptions(node_func):
+    """Wrap any node function so unhandled exceptions are captured in state['error']
+    instead of crashing the graph."""
+    @wraps(node_func)
+    def wrapper(state: AgentState) -> AgentState:
+        try:
+            result = node_func(state)
+            if isinstance(result, dict):
+                result.setdefault("error", None)
+            return result
+        except Exception as exc:
+            logger.error(f"Unhandled exception in {node_func.__name__}: {exc}", exc_info=True)
+            return {
+                **state,
+                "error": str(exc),
+            }
+    return wrapper
+
+
+def error_handler_node(state: AgentState) -> dict:
+    """Read state['error'], surface it as a human-readable AI message, then clear it."""
+    error_message = state.get("error", "An unexpected error occurred.")
+    return {
+        **state,
+        "messages": state["messages"] + [
+            AIMessage(
+                content=(
+                    f":warning: An error occurred while processing your request:\n\n"
+                    f"```\n{error_message}\n```\n\n"
+                    f"Please try again or rephrase your request."
+                )
+            )
+        ],
+        "error": None,
+    }
+
+
+def route_on_error(next_node: str):
+    """Return a router that goes to 'error_handler' when state['error'] is set,
+    otherwise continues to *next_node*."""
+    def router(state: AgentState) -> str:
+        return "error_handler" if state.get("error") else next_node
+    return router
+
+
+# =============================================================================
 # Graph Construction
 # =============================================================================
 
 def create_graph():
-    """Create the LangGraph workflow with interrupt-based push approval.
-    
-    Uses MemorySaver checkpointer to enable interrupt/resume functionality.
+    """Create the LangGraph workflow with interrupt-based push approval and a
+    generic exception handler that feeds errors back into the chat.
     """
     workflow = StateGraph(AgentState)
-    
-    # Add nodes
-    workflow.add_node("setup", setup_node)
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tools_node)
-    workflow.add_node("approval_check", approval_check_node)
-    workflow.add_node("push_approval", push_approval_node)
-    workflow.add_node("execute_push", execute_push_node)
-    
-    # Set entry point
+
+    # --- Nodes (all wrapped with the exception catcher) ---
+    workflow.add_node("setup",          catch_exceptions(setup_node))
+    workflow.add_node("agent",          catch_exceptions(agent_node))
+    workflow.add_node("tools",          catch_exceptions(tools_node))
+    workflow.add_node("approval_check", catch_exceptions(approval_check_node))
+    workflow.add_node("push_approval",  catch_exceptions(push_approval_node))
+    workflow.add_node("execute_push",   catch_exceptions(execute_push_node))
+    workflow.add_node("error_handler",  error_handler_node)  # new node
+
+    # --- Entry point ---
     workflow.set_entry_point("setup")
-    
-    # Add edges
-    workflow.add_edge("setup", "agent")
-    
-    # Main agent routing
+
+    # --- setup → (error?) → agent ---
+    workflow.add_conditional_edges(
+        "setup",
+        route_on_error("agent"),
+        {"agent": "agent", "error_handler": "error_handler"},
+    )
+
+    # --- agent → (error?) → original routing ---
+    def agent_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "error_handler"
+        return should_continue(state)
+
     workflow.add_conditional_edges(
         "agent",
-        should_continue,
+        agent_router,
         {
-            "tools": "tools",
+            "tools":          "tools",
             "approval_check": "approval_check",
-            "push_approval": "push_approval",
-            "end": END,
-        }
+            "push_approval":  "push_approval",
+            "end":            END,
+            "error_handler":  "error_handler",
+        },
     )
-    
-    workflow.add_edge("tools", "agent")
-    workflow.add_edge("approval_check", "agent")
-    
-    # Push approval flow
+
+    # --- tools → (error?) → agent ---
+    workflow.add_conditional_edges(
+        "tools",
+        route_on_error("agent"),
+        {"agent": "agent", "error_handler": "error_handler"},
+    )
+
+    # --- approval_check → (error?) → agent ---
+    workflow.add_conditional_edges(
+        "approval_check",
+        route_on_error("agent"),
+        {"agent": "agent", "error_handler": "error_handler"},
+    )
+
+    # --- push_approval → (error?) → original routing ---
+    def push_approval_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "error_handler"
+        return should_continue_after_push_approval(state)
+
     workflow.add_conditional_edges(
         "push_approval",
-        should_continue_after_push_approval,
+        push_approval_router,
         {
-            "execute_push": "execute_push",
-            "agent": "agent",
-        }
+            "execute_push":  "execute_push",
+            "agent":         "agent",
+            "error_handler": "error_handler",
+        },
     )
-    workflow.add_edge("execute_push", "agent")
-    
-    # Compile with checkpointer to enable interrupt/resume
+
+    # --- execute_push → (error?) → agent ---
+    workflow.add_conditional_edges(
+        "execute_push",
+        route_on_error("agent"),
+        {"agent": "agent", "error_handler": "error_handler"},
+    )
+
+    # --- error_handler always returns to agent so the user can continue ---
+    workflow.add_edge("error_handler", "agent")
+
+    # --- Compile ---
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
 
@@ -842,6 +931,7 @@ def create_initial_state(repo_path: str | None = None, mop_path: str | None = No
         "repo_path": repo_path,
         "mop_path": mop_path,
         "non_interactive": False,
+        "error": None,
     }
 
 

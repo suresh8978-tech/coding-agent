@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 def _format_tree_node(node: Any, indent: int = 0) -> list[str]:
@@ -35,6 +36,7 @@ def _format_tree_node(node: Any, indent: int = 0) -> list[str]:
 
 
 @tool
+@safe_tool
 def scan_ansible_project(path: str) -> dict[str, Any]:
     """Scan an Ansible project directory and generate its AST.
     
@@ -110,6 +112,7 @@ def scan_ansible_project(path: str) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def analyze_playbook(path: str) -> dict[str, Any]:
     """Analyze a single Ansible playbook file.
     
@@ -198,6 +201,7 @@ def analyze_playbook(path: str) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def analyze_role(path: str) -> dict[str, Any]:
     """Analyze an Ansible role directory structure.
     
@@ -299,6 +303,7 @@ def analyze_role(path: str) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def find_tasks_using_module(path: str, module: str) -> list[dict[str, Any]]:
     """Find all tasks that use a specific Ansible module.
     
@@ -361,6 +366,7 @@ def find_tasks_using_module(path: str, module: str) -> list[dict[str, Any]]:
 
 
 @tool
+@safe_tool
 def get_variable_usage(path: str) -> dict[str, Any]:
     """Analyze variable definitions and usage in Ansible content.
     

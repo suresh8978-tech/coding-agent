@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 def _get_sg_root(source: str, language: str = "python"):
@@ -15,6 +16,7 @@ def _get_sg_root(source: str, language: str = "python"):
 
 
 @tool
+@safe_tool
 def modify_python_code(path: str, pattern: str, replacement: str) -> dict[str, Any]:
     """Modify Python code by replacing patterns using ast-grep.
     
@@ -74,6 +76,7 @@ def modify_python_code(path: str, pattern: str, replacement: str) -> dict[str, A
 
 
 @tool
+@safe_tool
 def add_import(path: str, import_stmt: str) -> dict[str, Any]:
     """Add an import statement to a Python file.
     
@@ -144,6 +147,7 @@ def add_import(path: str, import_stmt: str) -> dict[str, Any]:
 
 
 @tool
+@safe_tool
 def add_function(path: str, func_code: str, after: str = "") -> dict[str, Any]:
     """Add a new function to a Python file.
     

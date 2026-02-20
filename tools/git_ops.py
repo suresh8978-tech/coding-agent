@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 from langchain_core.tools import tool
+from tools.utils import safe_tool
 
 
 def _run_git_command(args: list[str], cwd: Optional[str] = None) -> tuple[bool, str]:
@@ -39,6 +40,7 @@ def _run_git_command(args: list[str], cwd: Optional[str] = None) -> tuple[bool, 
 
 
 @tool
+@safe_tool
 def git_fetch_all() -> str:
     """Fetch all branches from all remotes.
     
@@ -52,6 +54,7 @@ def git_fetch_all() -> str:
 
 
 @tool
+@safe_tool
 def git_create_branch(name: str) -> str:
     """Create a new branch with 'agent-' prefix.
     
@@ -75,6 +78,7 @@ def git_create_branch(name: str) -> str:
 
 
 @tool
+@safe_tool
 def git_checkout(branch: str) -> str:
     """Switch to an existing branch.
     
@@ -91,6 +95,7 @@ def git_checkout(branch: str) -> str:
 
 
 @tool
+@safe_tool
 def git_add(files: str) -> str:
     """Stage files for commit.
     
@@ -108,6 +113,7 @@ def git_add(files: str) -> str:
 
 
 @tool
+@safe_tool
 def git_commit(message: str) -> str:
     """Commit staged changes.
     
@@ -124,6 +130,7 @@ def git_commit(message: str) -> str:
 
 
 @tool
+@safe_tool
 def git_push(remote: str = "origin", branch: str = "") -> str:
     """Push commits to remote repository.
     
@@ -145,6 +152,7 @@ def git_push(remote: str = "origin", branch: str = "") -> str:
 
 
 @tool
+@safe_tool
 def git_diff(staged: bool = False) -> str:
     """Get the diff of changes.
     
@@ -162,6 +170,7 @@ def git_diff(staged: bool = False) -> str:
 
 
 @tool
+@safe_tool
 def git_status() -> str:
     """Get the current repository status.
     
