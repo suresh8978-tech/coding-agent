@@ -1076,6 +1076,7 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
     print()
     
     interrupted = False  # Track if we're in an interrupted state
+    first_invocation = True  # Track first invocation to pass full initial state
     
     try:
         while True:
@@ -1097,9 +1098,16 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
                     result = graph.invoke(Command(resume=user_input), config)
                     interrupted = False
                 else:
-                    # Normal invocation
-                    state["messages"] = list(state["messages"]) + [HumanMessage(content=user_input)]
-                    result = graph.invoke(state, config)
+                    if first_invocation:
+                        # First invocation: pass the full initial state
+                        state["messages"] = [HumanMessage(content=user_input)]
+                        result = graph.invoke(state, config)
+                        first_invocation = False
+                    else:
+                        result = graph.invoke(
+                            {"messages": [HumanMessage(content=user_input)]},
+                            config,
+                        )
                 
                 state = result
                 
