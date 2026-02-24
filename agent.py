@@ -769,7 +769,6 @@ def catch_exceptions(node_func):
                 result.setdefault("error", None)
             return result
         except Exception as exc:
-            # Re-raise GraphInterrupt so LangGraph's interrupt() works properly
             from langgraph.errors import GraphInterrupt
             if isinstance(exc, GraphInterrupt):
                 raise
