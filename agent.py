@@ -60,6 +60,7 @@ from tools.ansible_analysis import (
 )
 from tools.ansible_coding import modify_task, add_task, modify_variable, modify_yaml_file
 from tools.shell_ops import run_shell_command, find_files, search_in_files
+from tools.integrated_tools import query_large_file, query_ansible_log, extract_ansible_metrics
 from tools.approval import (
     PendingChange,
     create_modification_plan,
@@ -153,8 +154,9 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 3. **MOP Analysis**: Read and parse Method of Procedure documents (DOCX format, up to 90 pages)
 4. **Python Analysis**: Analyze Python code structure using ast-grep (functions, classes, imports, patterns)
 5. **Ansible Analysis**: Analyze Ansible projects, playbooks, roles, tasks, and variables
-6. **Python Coding**: Modify Python code, add imports, add functions
-7. **Ansible Coding**: Modify tasks, add tasks, update variables, modify YAML files
+6. **Ansible Log Analysis**: Parse and analyze Ansible execution logs to find failed tasks, affected hosts, and execution summaries using `query_ansible_log` and `extract_ansible_metrics`
+7. **Python Coding**: Modify Python code, add imports, add functions
+8. **Ansible Coding**: Modify tasks, add tasks, update variables, modify YAML files
 
 ## Workflow Rules (CRITICAL):
 
@@ -281,6 +283,10 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
+    # Integrated tools
+    query_large_file,
+    query_ansible_log,
+    extract_ansible_metrics,
 ]
 
 
@@ -766,6 +772,11 @@ def catch_exceptions(node_func):
                 result.setdefault("error", None)
             return result
         except Exception as exc:
+            # Re-raise GraphInterrupt so LangGraph's interrupt() works properly
+            from langgraph.errors import GraphInterrupt
+            if isinstance(exc, GraphInterrupt):
+                raise
+                
             logger.error(f"Unhandled exception in {node_func.__name__}: {exc}", exc_info=True)
             return {
                 **state,
