@@ -57,10 +57,10 @@ from tools.ansible_analysis import (
     analyze_role,
     find_tasks_using_module,
     get_variable_usage,
+    parse_ansible_log,
 )
 from tools.ansible_coding import modify_task, add_task, modify_variable, modify_yaml_file
 from tools.shell_ops import run_shell_command, find_files, search_in_files
-from tools.integrated_tools import query_large_file, query_ansible_log, extract_ansible_metrics
 from tools.approval import (
     PendingChange,
     create_modification_plan,
@@ -154,7 +154,7 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 3. **MOP Analysis**: Read and parse Method of Procedure documents (DOCX format, up to 90 pages)
 4. **Python Analysis**: Analyze Python code structure using ast-grep (functions, classes, imports, patterns)
 5. **Ansible Analysis**: Analyze Ansible projects, playbooks, roles, tasks, and variables
-6. **Ansible Log Analysis**: Parse and analyze Ansible execution logs to find failed tasks, affected hosts, and execution summaries using `query_ansible_log` and `extract_ansible_metrics`
+6. **Ansible Log Analysis**: Parse and analyze Ansible execution logs to find failed tasks, affected hosts, and execution summaries using `parse_ansible_log`
 7. **Python Coding**: Modify Python code, add imports, add functions
 8. **Ansible Coding**: Modify tasks, add tasks, update variables, modify YAML files
 
@@ -274,6 +274,7 @@ ALL_TOOLS = [
     analyze_role,
     find_tasks_using_module,
     get_variable_usage,
+    parse_ansible_log,
     # Ansible coding
     modify_task,
     add_task,
@@ -283,10 +284,6 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
-    # Integrated tools
-    query_large_file,
-    query_ansible_log,
-    extract_ansible_metrics,
 ]
 
 

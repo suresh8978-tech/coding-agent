@@ -445,3 +445,116 @@ def get_variable_usage(path: str) -> dict[str, Any]:
     result["usage"] = unique_usage
     
     return result
+
+@tool
+@safe_tool
+def parse_ansible_log(path: str) -> dict[str, Any]:
+    """Parse an Ansible execution log file to extract failures, changes, and summary.
+    
+    Use this tool whenever you need to analyze the output/log of an Ansible playbook run.
+    It automatically extracts failed tasks with their error messages, changed tasks, 
+    and the final play recap.
+    
+    Args:
+        path: Path to the Ansible log file.
+        
+    Returns:
+        Dictionary containing parsed log data:
+        - failed_tasks: List of failed tasks with host and error message
+        - changed_tasks: List of tasks that made changes
+        - recap: The PLAY RECAP section showing host statistics
+        - total_failed: Total number of failures
+    """
+    log_path = Path(path)
+    if not log_path.exists():
+        return {"error": f"Log file '{path}' does not exist."}
+    
+    try:
+        content = log_path.read_text(encoding='utf-8')
+    except Exception as e:
+        return {"error": f"Failed to read log file: {str(e)}"}
+
+    result = {
+        "failed_tasks": [],
+        "changed_tasks": [],
+        "recap": "",
+        "total_failed": 0
+    }
+
+    import re
+
+    # Extract RECAP
+    recap_match = re.search(r'PLAY RECAP \*+([\s\S]+?)(?:\n\n|\Z)', content)
+    if recap_match:
+        result["recap"] = recap_match.group(1).strip()
+
+    # Split into tasks
+    # A task header looks like: TASK [task name] ***...
+    # or PLAY [play name] ***...
+    task_sections = re.split(r'\n(?:TASK|RUNNING HANDLER)\s+\[([^\]]+)\]\s*\*+\n', content)
+    
+    if len(task_sections) <= 1:
+        # Maybe no tasks matched, just return raw if not empty
+        if not result["recap"]:
+            return {"message": "No recognizable Ansible tasks or recap found in log."}
+        return result
+
+    current_play = "Unknown Play"
+    
+    # Check preamble for initial play name
+    play_match = re.search(r'PLAY\s+\[([^\]]+)\]\s*\*+', task_sections[0])
+    if play_match:
+        current_play = play_match.group(1)
+
+    for i in range(1, len(task_sections), 2):
+        task_name = task_sections[i]
+        task_content = task_sections[i+1] if i+1 < len(task_sections) else ""
+        
+        # Check if the task_content contains a new PLAY header before the next task
+        play_matches = re.findall(r'PLAY\s+\[([^\]]+)\]\s*\*+', task_content)
+        next_play = play_matches[-1] if play_matches else current_play
+
+        # Extract failed hosts
+        # format: fatal: [hostname]: FAILED! => {"changed": false, "msg": "..."}
+        # or failed: [hostname] (item=...) => {"...
+        failed_blocks = re.finditer(r'(?:fatal|failed):\s*\[([^\]]+)\][^=]*=>\s*(\{[\s\S]*?(?=\n(?:fatal|failed|ok|changed|skipping|PLAY RECAP|\n\n)|\Z))', task_content)
+        
+        for f_match in failed_blocks:
+            host = f_match.group(1)
+            error_details = f_match.group(2).strip()
+            result["failed_tasks"].append({
+                "play": current_play,
+                "task": task_name,
+                "host": host,
+                "error": error_details
+            })
+            result["total_failed"] += 1
+            
+        # Also catch generic fatal without JSON (e.g. unreachable)
+        unreachable_blocks = re.finditer(r'(?:fatal|unreachable):\s*\[([^\]]+)\](?!\s*=>)(.*)', task_content)
+        for u_match in unreachable_blocks:
+            host = u_match.group(1)
+            error_details = u_match.group(2).strip()
+            # Avoid double counting if it matched the JSON one
+            if not any(f["task"] == task_name and f["host"] == host for f in result["failed_tasks"]):
+                result["failed_tasks"].append({
+                    "play": current_play,
+                    "task": task_name,
+                    "host": host,
+                    "error": error_details
+                })
+                result["total_failed"] += 1
+
+        # Extract changed hosts
+        changed_blocks = re.finditer(r'changed:\s*\[([^\]]+)\]', task_content)
+        for c_match in changed_blocks:
+            host = c_match.group(1)
+            result["changed_tasks"].append({
+                "play": current_play,
+                "task": task_name,
+                "host": host
+            })
+            
+        current_play = next_play
+
+    return result
