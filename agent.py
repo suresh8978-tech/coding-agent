@@ -488,13 +488,14 @@ def should_continue(state: AgentState) -> Literal["tools", "approval_check", "pu
     messages = state["messages"]
     last_message = messages[-1] if messages else None
     
+    # Check if we need push approval FIRST (interrupt-based) — this takes
+    # priority over tool calls to prevent infinite git_push retry loops.
+    if state.get("awaiting_push_approval"):
+        return "push_approval"
+    
     # If the last message has tool calls, execute them
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         return "tools"
-    
-    # Check if we need push approval (interrupt-based)
-    if state.get("awaiting_push_approval"):
-        return "push_approval"
     
     # Check if we need modification approval
     if state.get("awaiting_modification_approval"):
@@ -943,11 +944,18 @@ def create_graph():
         },
     )
 
-    # --- tools → (error?) → agent ---
+    # --- tools → (error? or push blocked?) → agent/push_approval ---
+    def tools_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "error_handler"
+        if state.get("awaiting_push_approval"):
+            return "push_approval"
+        return "agent"
+
     workflow.add_conditional_edges(
         "tools",
-        route_on_error("agent"),
-        {"agent": "agent", "error_handler": "error_handler"},
+        tools_router,
+        {"agent": "agent", "error_handler": "error_handler", "push_approval": "push_approval"},
     )
 
     # --- approval_check → (error?) → agent ---
