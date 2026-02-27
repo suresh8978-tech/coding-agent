@@ -380,12 +380,12 @@ def agent_node(state: AgentState) -> dict:
             context = "\n\n[SYSTEM: You have pending changes awaiting user approval. "
             context += "Wait for the user to approve, reject, or request modifications.]\n"
             context += format_changes_for_display(pending)
-            messages = messages + [SystemMessage(content=context)]
+            messages = messages + [HumanMessage(content=context)]
     
     if state.get("awaiting_push_approval"):
         branch = state.get("current_branch", "unknown")
         context = f"\n\n[SYSTEM: Changes have been applied. Awaiting push approval for branch '{branch}'.]\n"
-        messages = messages + [SystemMessage(content=context)]
+        messages = messages + [HumanMessage(content=context)]
     
     # Append thoroughness hint when running non-interactively (single-shot query)
     if state.get("non_interactive"):
@@ -396,7 +396,7 @@ def agent_node(state: AgentState) -> dict:
             "find_classes, find_functions, and scan_ansible_project as appropriate. "
             "Do NOT give up after one or two tool calls.]\n"
         )
-        messages = messages + [SystemMessage(content=hint)]
+        messages = messages + [HumanMessage(content=hint)]
 
     # Check for consecutive tool errors — if the agent has failed 3+ times in a
     # row with the same kind of tool error, stop retrying and tell the user.
@@ -674,10 +674,12 @@ def tools_node(state: AgentState) -> dict:
 
     # If any tool returned an error, inject a system nudge so the LLM is
     # explicitly instructed to surface the error to the user verbatim.
+    # We use HumanMessage here instead of SystemMessage because trailing SystemMessages
+    # get mapped to assistant prefills by LiteLLM, which AWS Bedrock strictly rejects.
     if tool_errors:
         error_summary = "\n".join(tool_errors)
         all_result_messages.append(
-            SystemMessage(
+            HumanMessage(
                 content=(
                     "[SYSTEM CRITICAL: One or more tools returned errors. "
                     "Before continuing, you MUST output a message to the user starting with "

@@ -87,7 +87,7 @@ def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
 @safe_tool
 def write_file(
     path: str,
-    content: str = "",
+    content: str,
     mode: str = "write",
     start_line: int = 0,
     end_line: int = 0,
@@ -102,7 +102,7 @@ def write_file(
 
     Args:
         path: Absolute or relative path to the file to write.
-        content: The content to write (REQUIRED — chunk text, not the whole file for large files).
+        content: The content to write (REQUIRED). To create an empty file, pass an empty string "".
         mode: Write mode —
               'write'  : overwrite the entire file (use for first chunk or small files).
               'append' : append content to the end of an existing file (use for subsequent chunks).
@@ -113,18 +113,9 @@ def write_file(
     Returns:
         Success message with current line count, or error description.
     """
-    # Guard against LLM calls that omit the content argument
-    if not content and mode != "write":
-        return (
-            f"Error: 'content' is required for write_file. "
-            f"Please call write_file(path='{path}', content='<your content here>', mode='{mode}')."
-        )
-    if not content and mode == "write":
-        return (
-            f"Error: 'content' is required for write_file. "
-            f"You called write_file(path='{path}') without any content. "
-            f"Please provide the text you want to write as the 'content' argument."
-        )
+    # Guard against empty content calls when not explicitly intended
+    if content == "" and mode in ("append", "patch"):
+        return f"Error: Cannot {mode} with empty content. Provide the text you want to {mode}."
     try:
         file_path = Path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
