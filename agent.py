@@ -643,16 +643,32 @@ def tools_node(state: AgentState) -> dict:
             logger.info(f"Output from {tool_name}:")
             logger.info(f"  {_truncate_str(output, 500)}")
 
-            # Detect error strings produced by safe_tool or existing handlers.
+            # Detect error strings produced by safe_tool, ToolNode, or our own
+            # handlers.  We ONLY match on prefixes that our error-producing code
+            # actually emits, to avoid false positives when tool output happens
+            # to contain words like "ValidationError" (e.g. Django source code).
             # Skip the [BLOCKED] pseudo-error — that is handled separately.
-            if not output.startswith("[BLOCKED]") and (
-                output.startswith("Error in tool")
-                or output.startswith("Error:")
-                or output.startswith("Error ")
-                or "ValidationError" in output
-                or "Field required" in output
-                or "field required" in output
-            ):
+            _ERROR_PREFIXES = (
+                "Error in tool",        # safe_tool decorator
+                "Error invoking tool",  # ToolNode handle_tool_errors
+                "Error:",               # file_ops custom errors (Error: File, Error: Permission, etc.)
+                "Error reading file:",  # read_file
+                "Error writing file:",  # write_file
+                "Error listing directory:",  # list_directory
+                "Error checking path:",     # file_exists
+                "Error fetching:",      # git_fetch_all
+                "Error creating branch:",  # git_create_branch
+                "Error switching branch:", # git_checkout
+                "Error staging files:", # git_add
+                "Error committing:",    # git_commit
+                "Error pushing:",       # git_push
+                "Error getting diff:",  # git_diff
+                "Error getting status:",   # git_status
+                "Error getting current branch:", # get_current_branch
+                "Error executing command:", # run_shell_command
+                "Error searching",      # find_files / search_in_files
+            )
+            if not output.startswith("[BLOCKED]") and output.startswith(_ERROR_PREFIXES):
                 logger.warning(f"Tool error detected from '{tool_name}': {output[:200]}")
                 tool_errors.append(f"**{tool_name}**: {output}")
 
