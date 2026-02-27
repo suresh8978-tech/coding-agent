@@ -140,6 +140,9 @@ class AgentState(TypedDict):
     # Holds an error message when a node raises an unhandled exception
     error: Optional[str]
 
+    # Tracks consecutive tool errors to break infinite retry loops
+    consecutive_tool_errors: int
+
 
 
 # =============================================================================
@@ -314,6 +317,41 @@ def create_agent(model_name: str | None = None):
     return llm.bind_tools(ALL_TOOLS)
 
 
+def _sanitize_messages(messages: list) -> list:
+    """Remove orphaned ToolMessages that have no matching tool_use in the preceding AIMessage.
+    
+    The Anthropic API requires every tool_result to have a corresponding tool_use
+    in the immediately preceding assistant message. This function strips any
+    ToolMessages whose tool_call_id is not found in the preceding AIMessage's
+    tool_calls list.
+    """
+    sanitized = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            # Find the most recent AIMessage before this ToolMessage
+            preceding_ai = None
+            for j in range(len(sanitized) - 1, -1, -1):
+                if isinstance(sanitized[j], AIMessage):
+                    preceding_ai = sanitized[j]
+                    break
+            if preceding_ai and hasattr(preceding_ai, 'tool_calls') and preceding_ai.tool_calls:
+                tool_ids = {tc['id'] for tc in preceding_ai.tool_calls}
+                if msg.tool_call_id not in tool_ids:
+                    logger.warning(
+                        f"Dropping orphaned ToolMessage with tool_call_id={msg.tool_call_id}"
+                    )
+                    continue
+            elif preceding_ai is None:
+                # No preceding AI message at all — definitely orphaned
+                logger.warning(
+                    f"Dropping orphaned ToolMessage (no preceding AIMessage) "
+                    f"with tool_call_id={msg.tool_call_id}"
+                )
+                continue
+        sanitized.append(msg)
+    return sanitized
+
+
 def agent_node(state: AgentState) -> dict:
     """Main agent node that processes messages and decides actions."""
     messages = state["messages"]
@@ -359,6 +397,30 @@ def agent_node(state: AgentState) -> dict:
             "Do NOT give up after one or two tool calls.]\n"
         )
         messages = messages + [SystemMessage(content=hint)]
+
+    # Check for consecutive tool errors — if the agent has failed 3+ times in a
+    # row with the same kind of tool error, stop retrying and tell the user.
+    max_consecutive_errors = 3
+    error_count = state.get("consecutive_tool_errors", 0)
+    if error_count >= max_consecutive_errors:
+        logger.warning(
+            f"Breaking retry loop after {error_count} consecutive tool errors"
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"I've encountered repeated tool errors ({error_count} consecutive failures). "
+                        "To avoid an infinite loop I'm stopping here. "
+                        "Please check the error details above and try rephrasing your request."
+                    )
+                )
+            ],
+            "consecutive_tool_errors": 0,
+        }
+
+    # Sanitize messages to remove orphaned ToolMessages before sending to the API
+    messages = _sanitize_messages(messages)
 
     # Get LLM response with rate-limit retry (exponential backoff, max 5 attempts)
     agent = create_agent()
@@ -587,6 +649,9 @@ def tools_node(state: AgentState) -> dict:
                 output.startswith("Error in tool")
                 or output.startswith("Error:")
                 or output.startswith("Error ")
+                or "ValidationError" in output
+                or "Field required" in output
+                or "field required" in output
             ):
                 logger.warning(f"Tool error detected from '{tool_name}': {output[:200]}")
                 tool_errors.append(f"**{tool_name}**: {output}")
@@ -601,7 +666,8 @@ def tools_node(state: AgentState) -> dict:
                     "[SYSTEM CRITICAL: One or more tools returned errors. "
                     "Before continuing, you MUST output a message to the user starting with "
                     "':warning: **TOOL ERROR**' and then paste the exact error message(s) below. "
-                    "Do not hide or summarize the error.]\n\n"
+                    "Do not hide or summarize the error. Do NOT retry the same tool call "
+                    "with the same arguments — try a different approach or ask the user.]\n\n"
                     + error_summary
                 )
             )
@@ -611,6 +677,12 @@ def tools_node(state: AgentState) -> dict:
     
     # Build updates
     updates: dict[str, Any] = {"messages": all_result_messages}
+
+    # Track consecutive tool errors to break infinite retry loops
+    if tool_errors:
+        updates["consecutive_tool_errors"] = state.get("consecutive_tool_errors", 0) + 1
+    else:
+        updates["consecutive_tool_errors"] = 0
     
     # Store blocked push call if any
     if blocked_push_call:
@@ -692,20 +764,19 @@ def push_approval_node(state: AgentState) -> dict:
             "awaiting_push_approval": False,
             "pending_push_call": None,
             "messages": [
-                ToolMessage(
-                    tool_call_id=pending_push["id"] if pending_push else "cancelled",
-                    content="Push cancelled by user.",
-                    name="git_push"
-                )
+                AIMessage(content="Push cancelled by user. No changes were pushed to the remote repository.")
             ]
         }
     else:
-        # Treat any other response as feedback/cancel
+        # Treat any other response as feedback — provide context via AIMessage
         return {
             "push_approved": False,
             "awaiting_push_approval": False,
             "pending_push_call": None,
             "user_feedback": user_response,
+            "messages": [
+                AIMessage(content=f"Push deferred. User feedback: {user_response}")
+            ],
         }
 
 
@@ -966,6 +1037,7 @@ def create_initial_state(repo_path: str | None = None, mop_path: str | None = No
         "mop_path": mop_path,
         "non_interactive": False,
         "error": None,
+        "consecutive_tool_errors": 0,
     }
 
 
