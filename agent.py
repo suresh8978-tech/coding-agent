@@ -622,7 +622,7 @@ def tools_node(state: AgentState) -> dict:
         temp_state = dict(state)
         temp_state["messages"] = temp_messages
         
-        tool_node = ToolNode(ALL_TOOLS)
+        tool_node = ToolNode(ALL_TOOLS, handle_tool_errors=True)
         node_result = tool_node.invoke(temp_state)
         result_messages = node_result.get("messages", [])
     
