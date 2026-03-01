@@ -670,8 +670,11 @@ def tools_node(state: AgentState) -> dict:
                 "Error searching",      # find_files / search_in_files
             )
             if not output.startswith("[BLOCKED]") and output.startswith(_ERROR_PREFIXES):
-                logger.warning(f"Tool error detected from '{tool_name}': {output[:200]}")
-                tool_errors.append(f"**{tool_name}**: {output}")
+                if tool_name == "write_file":
+                    pass
+                else:
+                    logger.warning(f"Tool error detected from '{tool_name}': {output[:200]}")
+                    tool_errors.append(f"**{tool_name}**: {output}")
 
     # If any tool returned an error, inject a system nudge so the LLM is
     # explicitly instructed to surface the error to the user verbatim.
