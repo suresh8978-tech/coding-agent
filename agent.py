@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
 from langchain_litellm import ChatLiteLLM
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, RemoveMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -133,6 +133,9 @@ class AgentState(TypedDict):
     
     # User feedback for revisions
     user_feedback: str | None
+    
+    # Conversation summary for context window management
+    summary: str | None
 
     # Flag set when running in non-interactive (--query) mode
     non_interactive: bool
@@ -370,6 +373,11 @@ def agent_node(state: AgentState) -> dict:
         if mop_content:
             system_content += build_context_message(mop_content)
             
+        # Add Conversation Summary if available
+        summary = state.get("summary")
+        if summary:
+            system_content += f"\n\n[SYSTEM: Conversation Summary of earlier messages:]\n{summary}\n"
+            
         messages = [SystemMessage(content=system_content)] + list(messages)
     
     # Check if we're awaiting approval
@@ -504,11 +512,11 @@ def should_continue(state: AgentState) -> Literal["tools", "approval_check", "pu
     return "end"
 
 
-def should_continue_after_push_approval(state: AgentState) -> Literal["execute_push", "agent"]:
-    """After push approval node, determine if we execute push or return to agent."""
+def should_continue_after_push_approval(state: AgentState) -> Literal["execute_push", "summarize"]:
+    """After push approval node, determine if we execute push or return to summarize."""
     if state.get("push_approved"):
         return "execute_push"
-    return "agent"
+    return "summarize"
 
 
 def approval_check_node(state: AgentState) -> dict:
@@ -892,6 +900,99 @@ def error_handler_node(state: AgentState) -> dict:
     }
 
 
+def summarize_node(state: AgentState) -> dict:
+    """Summarize older messages if the context gets too long."""
+    messages = state["messages"]
+    
+    # We use a heuristic for token counting: roughly 4 chars per token
+    # Only count human, ai, tool messages, ignoring system
+    # System message is added dynamically in agent_node, but it's safe to just sum up all
+    total_tokens = sum(len(str(m.content)) // 4 for m in messages if isinstance(m.content, str))
+    
+    # Let's say max allowed tokens for history before we summarize is 10,000
+    TOKEN_LIMIT = 10000
+    
+    # Only summarize if we are over the limit and we have more than a few messages
+    if total_tokens > TOKEN_LIMIT and len(messages) > 6:
+        # Leave at least 6 messages untouched at the end
+        keep_at_least = 6
+        idx = len(messages) - keep_at_least
+        
+        # We must not break apart an AIMessage with tool calls from its ToolMessages.
+        # We walk backwards from `idx` until we find a safe split point.
+        # A safe boundary is where:
+        #   messages[idx-1] is NOT an AIMessage with tool_calls
+        #   messages[idx] is NOT a ToolMessage
+        while idx > 0:
+            prev_msg = messages[idx - 1]
+            curr_msg = messages[idx]
+            
+            is_prev_ai_with_tools = isinstance(prev_msg, AIMessage) and getattr(prev_msg, "tool_calls", None)
+            is_curr_tool = isinstance(curr_msg, ToolMessage)
+            
+            if is_prev_ai_with_tools or is_curr_tool:
+                idx -= 1
+            else:
+                break
+        
+        if idx > 0:
+            # We will summarize messages[0:idx]
+            msgs_to_summarize = messages[0:idx]
+            
+            # Format messages for LLM summarization
+            summary_prompt = "Summarize the following conversation history concisely:\n\n"
+            for m in msgs_to_summarize:
+                role = m.type
+                content = str(m.content)[:500] + "..." if len(str(m.content)) > 500 else str(m.content)
+                summary_prompt += f"{role}: {content}\n"
+                
+            summary_messages = [
+                SystemMessage(content="You are a helpful assistant that summarizes conversation history. Focus on retaining key context, decisions made, and tasks completed."),
+                HumanMessage(content=summary_prompt)
+            ]
+            
+            llm_name = os.getenv("LLM_NAME", "anthropic/claude-3-haiku-20240307")
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            api_url = os.getenv("ANTHROPIC_API_URL")
+            
+            llm_kwargs = {
+                "model": llm_name,
+                "api_key": api_key,
+                "max_tokens": 4096,
+                "drop_params": True,
+            }
+            if api_url:
+                llm_kwargs["api_base"] = api_url
+                
+            llm = ChatLiteLLM(**llm_kwargs)
+            
+            try:
+                response = llm.invoke(summary_messages)
+                new_summary_text = response.content
+                
+                old_summary = state.get("summary")
+                if old_summary:
+                    # Combine old summary with new summary
+                    new_summary = f"{old_summary}\n\n[Additional Summary]:\n{new_summary_text}"
+                else:
+                    new_summary = new_summary_text
+                    
+                # We return RemoveMessages for all the ones we summarized
+                removals = [RemoveMessage(id=m.id) for m in msgs_to_summarize if m.id]
+                
+                logger.info(f"Summarized {len(msgs_to_summarize)} messages due to token limit.")
+                return {"summary": new_summary, "messages": removals}
+                
+            except Exception as e:
+                logger.error(f"Error during summarization: {e}")
+                # Fallback to a dumb summary
+                new_summary = state.get("summary", "") or ""
+                new_summary += f"\n[Truncated {len(msgs_to_summarize)} messages due to length]"
+                removals = [RemoveMessage(id=m.id) for m in msgs_to_summarize if m.id]
+                return {"summary": new_summary, "messages": removals}
+                
+    return {}
+
 def route_on_error(next_node: str):
     """Return a router that goes to 'error_handler' when state['error'] is set,
     otherwise continues to *next_node*."""
@@ -917,16 +1018,17 @@ def create_graph():
     workflow.add_node("approval_check", catch_exceptions(approval_check_node))
     workflow.add_node("push_approval",  catch_exceptions(push_approval_node))
     workflow.add_node("execute_push",   catch_exceptions(execute_push_node))
+    workflow.add_node("summarize",      catch_exceptions(summarize_node))
     workflow.add_node("error_handler",  error_handler_node)  # new node
 
     # --- Entry point ---
     workflow.set_entry_point("setup")
 
-    # --- setup → (error?) → agent ---
+    # --- setup → (error?) → summarize ---
     workflow.add_conditional_edges(
         "setup",
-        route_on_error("agent"),
-        {"agent": "agent", "error_handler": "error_handler"},
+        route_on_error("summarize"),
+        {"summarize": "summarize", "error_handler": "error_handler"},
     )
 
     # --- agent → (error?) → original routing ---
@@ -947,25 +1049,25 @@ def create_graph():
         },
     )
 
-    # --- tools → (error? or push blocked?) → agent/push_approval ---
+    # --- tools → (error? or push blocked?) → summarize/push_approval ---
     def tools_router(state: AgentState) -> str:
         if state.get("error"):
             return "error_handler"
         if state.get("awaiting_push_approval"):
             return "push_approval"
-        return "agent"
+        return "summarize"
 
     workflow.add_conditional_edges(
         "tools",
         tools_router,
-        {"agent": "agent", "error_handler": "error_handler", "push_approval": "push_approval"},
+        {"summarize": "summarize", "error_handler": "error_handler", "push_approval": "push_approval"},
     )
 
-    # --- approval_check → (error?) → agent ---
+    # --- approval_check → (error?) → summarize ---
     workflow.add_conditional_edges(
         "approval_check",
-        route_on_error("agent"),
-        {"agent": "agent", "error_handler": "error_handler"},
+        route_on_error("summarize"),
+        {"summarize": "summarize", "error_handler": "error_handler"},
     )
 
     # --- push_approval → (error?) → original routing ---
@@ -979,14 +1081,21 @@ def create_graph():
         push_approval_router,
         {
             "execute_push":  "execute_push",
-            "agent":         "agent",
+            "summarize":     "summarize",
             "error_handler": "error_handler",
         },
     )
 
-    # --- execute_push → (error?) → agent ---
+    # --- execute_push → (error?) → summarize ---
     workflow.add_conditional_edges(
         "execute_push",
+        route_on_error("summarize"),
+        {"summarize": "summarize", "error_handler": "error_handler"},
+    )
+    
+    # --- summarize → (error?) → agent ---
+    workflow.add_conditional_edges(
+        "summarize",
         route_on_error("agent"),
         {"agent": "agent", "error_handler": "error_handler"},
     )
@@ -1062,6 +1171,7 @@ def create_initial_state(repo_path: str | None = None, mop_path: str | None = No
         "mop_content": None,
         "agent_md_content": None,
         "user_feedback": None,
+        "summary": None,
         "repo_path": repo_path,
         "mop_path": mop_path,
         "non_interactive": False,
