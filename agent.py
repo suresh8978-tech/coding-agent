@@ -19,6 +19,7 @@ import logging
 import time
 from functools import wraps
 from typing import Annotated, Any, Literal, Optional, TypedDict
+import subprocess
 
 from dotenv import load_dotenv
 from langchain_litellm import ChatLiteLLM
@@ -299,7 +300,7 @@ ALL_TOOLS = [
 
 def create_agent(model_name: str | None = None):
     """Create the LLM agent with tools bound."""
-    llm_name = model_name or os.getenv("LLM_NAME", "anthropic/claude-3-haiku-20240307")
+    llm_name = model_name or os.getenv("LLM_NAME", "anthropic/bedrock-sonnet-4.6")
     api_key = os.getenv("ANTHROPIC_API_KEY")
     api_url = os.getenv("ANTHROPIC_API_URL")
     
@@ -495,12 +496,7 @@ def should_continue(state: AgentState) -> Literal["tools", "approval_check", "pu
     """Determine the next step based on current state."""
     messages = state["messages"]
     last_message = messages[-1] if messages else None
-    
-    # Check if we need push approval FIRST (interrupt-based) — this takes
-    # priority over tool calls to prevent infinite git_push retry loops.
-    if state.get("awaiting_push_approval"):
-        return "push_approval"
-    
+     
     # If the last message has tool calls, execute them
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         return "tools"
@@ -512,11 +508,11 @@ def should_continue(state: AgentState) -> Literal["tools", "approval_check", "pu
     return "end"
 
 
-def should_continue_after_push_approval(state: AgentState) -> Literal["execute_push", "summarize"]:
-    """After push approval node, determine if we execute push or return to summarize."""
+def should_continue_after_push_approval(state: AgentState) -> Literal["execute_push", "agent"]:
+    """After push approval node, determine if we execute push or return to agent."""
     if state.get("push_approved"):
         return "execute_push"
-    return "summarize"
+    return "agent"
 
 
 def approval_check_node(state: AgentState) -> dict:
@@ -601,13 +597,53 @@ def tools_node(state: AgentState) -> dict:
     
     for tc in last_message.tool_calls:
         if tc["name"] == "git_push" and not state.get("push_approved"):
-            # Block this push - requires approval
-            logger.warning(f"Blocking unapproved git_push call: {tc['id']}")
-            blocked_push_call = tc
+            # Instead of blocking, ask for approval inline
+            logger.info(f"git_push requires approval, prompting user")
+            
+            args = tc.get("args", {})
+            remote = args.get("remote", "origin")
+            branch = args.get("branch", "")
+            
+            # Prompt user directly
+            print(f"\n{'='*50}")
+            print(f"PUSH APPROVAL REQUIRED")
+            print(f"Remote: {remote}")
+            print(f"Branch: {branch or 'current (HEAD)'}")
+            print(f"{'='*50}")
+            
+            try:
+                approval = input("Push to remote? (yes/no): ").strip().lower()
+            except EOFError:
+                approval = "no"
+            
+            if approval in ["yes", "y", "push", "ok", "proceed"]:
+                # Execute push directly via subprocess
+                repo_path = os.environ.get("REPO_PATH", ".")
+                try:
+                    cmd = ["git", "push", remote, branch] if branch else ["git", "push", "-u", remote, "HEAD"]
+                    result = subprocess.run(
+                        cmd, cwd=repo_path, capture_output=True, text=True, timeout=60
+                    )
+                    output = result.stdout.strip() or result.stderr.strip()
+                    if result.returncode == 0:
+                        push_msg = f"Successfully pushed to {remote}.\n{output}" if output else f"Successfully pushed to {remote}."
+                    else:
+                        push_msg = f"Error pushing: {output}"
+                except subprocess.TimeoutExpired:
+                    push_msg = "Error pushing: Git push timed out."
+                except Exception as e:
+                    push_msg = f"Error pushing: {str(e)}"
+                
+                logger.info(f"Push result: {push_msg}")
+                print(f"\n{push_msg}\n")
+            else:
+                push_msg = "Push cancelled by user."
+                print(f"\n{push_msg}\n")
+            
             blocked_messages.append(
                 ToolMessage(
                     tool_call_id=tc["id"],
-                    content="[BLOCKED] git_push requires explicit user approval. Please wait for user confirmation.",
+                    content=push_msg,
                     name=tc["name"]
                 )
             )
@@ -819,26 +855,37 @@ def execute_push_node(state: AgentState) -> dict:
     
     if not pending_push:
         logger.warning("execute_push_node called but no pending_push_call found")
-        return {}
+        return {
+            "messages": [AIMessage(content="No pending push to execute.")],
+            "push_approved": False,
+            "pending_push_call": None,
+            "awaiting_push_approval": False,
+        }
     
     logger.info(f"Executing approved git_push: {pending_push}")
     
-    # Create a minimal AI message with just the push call
-    push_message = AIMessage(
-        content="",
-        tool_calls=[pending_push]
-    )
-    
-    temp_state = dict(state)
-    temp_state["messages"] = [push_message]
-    
-    tool_node = ToolNode([git_push])
-    result = tool_node.invoke(temp_state)
-    
-    # Log result
-    for msg in result.get("messages", []):
-        if isinstance(msg, ToolMessage):
-            logger.info(f"git_push result: {msg.content}")
+    args = pending_push("args", {})
+    remote = args.get("remote", "origin")
+    branch = args.get("branch", "")
+
+    # Call git push directly via subprocess
+    repo_path = os.environ.get("REPO_PATH", ".")
+    try:
+        cmd = ["git", "push", remote, branch] if branch else ["git", "push", "-u", remote, "HEAD"]
+        result = subprocess.run(
+            cmd, cwd=repo_path, capture_output=True, text=True, timeout=60
+        )
+        output = result.stdout.strip() or result.stderr.strip()
+        if result.returncode == 0:
+            msg =f"Successfully pushed to {remote}.\n{output}" if output else f"Successfully pushed to {remote}."
+        else:
+            msg = f"Error pushing: {output}"
+    except subprocess.TimeoutExpired:
+        msg = "Error pushing: Git push timed out."
+    except Exception as e:
+        msg = f"Error pushing: {str(e)}"
+
+    logger.info(f"git_push result: {msg}")                    
     
     return {
         "messages": result.get("messages", []),
@@ -853,51 +900,6 @@ def _truncate_str(s: str, max_len: int) -> str:
     if len(s) <= max_len:
         return s
     return s[:max_len] + "..."
-
-
-# =============================================================================
-# Exception Handling Infrastructure
-# =============================================================================
-
-def catch_exceptions(node_func):
-    """Wrap any node function so unhandled exceptions are captured in state['error']
-    instead of crashing the graph."""
-    @wraps(node_func)
-    def wrapper(state: AgentState) -> AgentState:
-        try:
-            result = node_func(state)
-            if isinstance(result, dict):
-                result.setdefault("error", None)
-            return result
-        except Exception as exc:
-            from langgraph.errors import GraphInterrupt
-            if isinstance(exc, GraphInterrupt):
-                raise
-                
-            logger.error(f"Unhandled exception in {node_func.__name__}: {exc}", exc_info=True)
-            return {
-                **state,
-                "error": str(exc),
-            }
-    return wrapper
-
-
-def error_handler_node(state: AgentState) -> dict:
-    """Read state['error'], surface it as a human-readable AI message, then clear it."""
-    error_message = state.get("error", "An unexpected error occurred.")
-    return {
-        **state,
-        "messages": state["messages"] + [
-            AIMessage(
-                content=(
-                    f":warning: An error occurred while processing your request:\n\n"
-                    f"```\n{error_message}\n```\n\n"
-                    f"Please try again or rephrase your request."
-                )
-            )
-        ],
-        "error": None,
-    }
 
 
 def summarize_node(state: AgentState) -> dict:
@@ -951,7 +953,7 @@ def summarize_node(state: AgentState) -> dict:
                 HumanMessage(content=summary_prompt)
             ]
             
-            llm_name = os.getenv("LLM_NAME", "anthropic/claude-3-haiku-20240307")
+            llm_name = os.getenv("LLM_NAME", "anthropic/bedrock-sonnet-4.6")
             api_key = os.getenv("ANTHROPIC_API_KEY")
             api_url = os.getenv("ANTHROPIC_API_URL")
             
@@ -993,6 +995,52 @@ def summarize_node(state: AgentState) -> dict:
                 
     return {}
 
+
+# =============================================================================
+# Exception Handling Infrastructure
+# =============================================================================
+
+def catch_exceptions(node_func):
+    """Wrap any node function so unhandled exceptions are captured in state['error']
+    instead of crashing the graph."""
+    @wraps(node_func)
+    def wrapper(state: AgentState) -> AgentState:
+        try:
+            result = node_func(state)
+            if isinstance(result, dict):
+                result.setdefault("error", None)
+            return result
+        except Exception as exc:
+            from langgraph.errors import GraphInterrupt
+            if isinstance(exc, GraphInterrupt):
+                raise
+                
+            logger.error(f"Unhandled exception in {node_func.__name__}: {exc}", exc_info=True)
+            return {
+                **state,
+                "error": str(exc),
+            }
+    return wrapper
+
+
+def error_handler_node(state: AgentState) -> dict:
+    """Read state['error'], surface it as a human-readable AI message, then clear it."""
+    error_message = state.get("error", "An unexpected error occurred.")
+    return {
+        **state,
+        "messages": state["messages"] + [
+            AIMessage(
+                content=(
+                    f":warning: An error occurred while processing your request:\n\n"
+                    f"```\n{error_message}\n```\n\n"
+                    f"Please try again or rephrase your request."
+                )
+            )
+        ],
+        "error": None,
+    }
+
+
 def route_on_error(next_node: str):
     """Return a router that goes to 'error_handler' when state['error'] is set,
     otherwise continues to *next_node*."""
@@ -1006,22 +1054,17 @@ def route_on_error(next_node: str):
 # =============================================================================
 
 def create_graph():
-    """Create the LangGraph workflow with interrupt-based push approval and a
-    generic exception handler that feeds errors back into the chat.
-    """
     workflow = StateGraph(AgentState)
 
-    # --- Nodes (all wrapped with the exception catcher) ---
     workflow.add_node("setup",          catch_exceptions(setup_node))
     workflow.add_node("agent",          catch_exceptions(agent_node))
     workflow.add_node("tools",          catch_exceptions(tools_node))
     workflow.add_node("approval_check", catch_exceptions(approval_check_node))
-    workflow.add_node("push_approval",  catch_exceptions(push_approval_node))
-    workflow.add_node("execute_push",   catch_exceptions(execute_push_node))
     workflow.add_node("summarize",      catch_exceptions(summarize_node))
-    workflow.add_node("error_handler",  error_handler_node)  # new node
+    workflow.add_node("error_handler",  error_handler_node)
 
-    # --- Entry point ---
+    # Remove push_approval and execute_push nodes entirely
+
     workflow.set_entry_point("setup")
 
     # --- setup → (error?) → summarize ---
@@ -1031,7 +1074,6 @@ def create_graph():
         {"summarize": "summarize", "error_handler": "error_handler"},
     )
 
-    # --- agent → (error?) → original routing ---
     def agent_router(state: AgentState) -> str:
         if state.get("error"):
             return "error_handler"
@@ -1043,24 +1085,16 @@ def create_graph():
         {
             "tools":          "tools",
             "approval_check": "approval_check",
-            "push_approval":  "push_approval",
             "end":            END,
             "error_handler":  "error_handler",
         },
     )
 
-    # --- tools → (error? or push blocked?) → summarize/push_approval ---
-    def tools_router(state: AgentState) -> str:
-        if state.get("error"):
-            return "error_handler"
-        if state.get("awaiting_push_approval"):
-            return "push_approval"
-        return "summarize"
-
+    # --- tools → (error?) → summarize ---
     workflow.add_conditional_edges(
         "tools",
-        tools_router,
-        {"summarize": "summarize", "error_handler": "error_handler", "push_approval": "push_approval"},
+        route_on_error("summarize"),
+        {"summarize": "summarize", "error_handler": "error_handler"},
     )
 
     # --- approval_check → (error?) → summarize ---
@@ -1070,29 +1104,6 @@ def create_graph():
         {"summarize": "summarize", "error_handler": "error_handler"},
     )
 
-    # --- push_approval → (error?) → original routing ---
-    def push_approval_router(state: AgentState) -> str:
-        if state.get("error"):
-            return "error_handler"
-        return should_continue_after_push_approval(state)
-
-    workflow.add_conditional_edges(
-        "push_approval",
-        push_approval_router,
-        {
-            "execute_push":  "execute_push",
-            "summarize":     "summarize",
-            "error_handler": "error_handler",
-        },
-    )
-
-    # --- execute_push → (error?) → summarize ---
-    workflow.add_conditional_edges(
-        "execute_push",
-        route_on_error("summarize"),
-        {"summarize": "summarize", "error_handler": "error_handler"},
-    )
-    
     # --- summarize → (error?) → agent ---
     workflow.add_conditional_edges(
         "summarize",
@@ -1100,10 +1111,8 @@ def create_graph():
         {"agent": "agent", "error_handler": "error_handler"},
     )
 
-    # --- error_handler returns to END so the graph pauses and waits for user input ---
     workflow.add_edge("error_handler", END)
 
-    # --- Compile ---
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
 
@@ -1242,7 +1251,7 @@ def run_single_query(query: str, repo_path: str | None = None, mop_path: str | N
     
     # Generate unique thread ID for this run
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10000}
     
     try:
         result = graph.invoke(state, config)
@@ -1271,7 +1280,7 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
     
     # Generate unique thread ID for this session
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10000}
     
     print("=" * 60)
     print("Coding Agent with Ansible & Python Capabilities")
@@ -1306,26 +1315,49 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
             try:
                 if interrupted:
                     # Resume from interrupt with user's response
-                    result = graph.invoke(Command(resume=user_input), config)
-                    interrupted = False
+                    print(f"[DEBUG] Resuming interrupt with: '{user_input}'")
+                    try:
+                        result = graph.invoke(Command(resume=user_input), config)
+                        interrupted = False
+                    except GraphInterrupt as e:
+                        # Another interrupt fired during resume
+                        interrupt_value = e.args[0] if e.args else "Approval required"
+                        print(f"\n{interrupt_value}")
+                        print("\nType 'push' to push, or 'cancel' to abort.\n")
+                        continue
                 else:
                     if first_invocation:
-                        # First invocation: pass the full initial state
                         state["messages"] = [HumanMessage(content=user_input)]
-                        result = graph.invoke(state, config)
+                        try:
+                            result = graph.invoke(state, config)
+                        except GraphInterrupt as e:
+                            interrupted = True
+                            interrupt_value = e.args[0] if e.args else "Push approval required"
+                            print(f"\n{interrupt_value}")
+                            print("\nType 'push' to push, or 'cancel' to abort.\n")
+                            first_invocation = False
+                            continue
                         first_invocation = False
                     else:
-                        result = graph.invoke(
-                            {"messages": [HumanMessage(content=user_input)]},
-                            config,
-                        )
+                        try:
+                            result = graph.invoke(
+                                {"messages": [HumanMessage(content=user_input)]},
+                                config,
+                            )
+                        except GraphInterrupt as e:
+                            interrupted = True
+                            interrupt_value = e.args[0] if e.args else "Push approval required"
+                            print(f"\n{interrupt_value}")
+                            print("\nType 'push' to push, or 'cancel' to abort.\n")
+                            continue
                 
                 state = result
                 
                 # Print the last AI message
                 for msg in reversed(state["messages"]):
                     if isinstance(msg, AIMessage):
-                        print(f"\nAgent: {msg.content}\n")
+                        if msg.content:  # Only print if non-empty
+                            print(f"\nAgent: {msg.content}\n")
                         break
                 
                 # Show pending changes if any
@@ -1333,19 +1365,12 @@ def run_interactive(repo_path: str | None = None, mop_path: str | None = None):
                     print("\n" + format_changes_for_display(state["pending_changes"]))
                     print("\nType 'approve' to apply changes or describe what you'd like to change.\n")
                     
-            except GraphInterrupt as e:
-                # Push approval interrupt triggered
-                interrupted = True
-                interrupt_value = e.args[0] if e.args else "Push approval required"
-                print(f"\n{interrupt_value}")
-                print("\nType 'push' to push, or 'cancel' to abort.\n")
-                
             except Exception as e:
                 error_msg = str(e)
                 print(f"\nError: {error_msg}\n")
                 import traceback
                 traceback.print_exc()
-                interrupted = False  # Reset interrupt state on error
+                interrupted = False
     
     except KeyboardInterrupt:
         print("\n\nInterrupted. Goodbye!")
