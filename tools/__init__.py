@@ -30,6 +30,7 @@ from tools.ansible_analysis import (
 )
 from tools.ansible_coding import modify_task, add_task, modify_variable, modify_yaml_file
 from tools.shell_ops import run_shell_command, find_files, search_in_files
+from tools.document_ops import create_document
 from tools.approval import (
     PendingChange,
     create_modification_plan,
@@ -83,4 +84,6 @@ __all__ = [
     "PendingChange",
     "create_modification_plan",
     "generate_unified_diff",
+    # Document creation
+    "create_document",
 ]

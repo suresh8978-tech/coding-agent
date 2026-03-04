@@ -62,6 +62,7 @@ from tools.ansible_analysis import (
 )
 from tools.ansible_coding import modify_task, add_task, modify_variable, modify_yaml_file
 from tools.shell_ops import run_shell_command, find_files, search_in_files
+from tools.document_ops import create_document
 from tools.approval import (
     PendingChange,
     create_modification_plan,
@@ -164,6 +165,7 @@ SYSTEM_PROMPT = """You are an intelligent coding agent specialized in Ansible an
 6. **Ansible Log Analysis**: Parse and analyze Ansible execution logs to find failed tasks, affected hosts, and execution summaries using `parse_ansible_log`
 7. **Python Coding**: Modify Python code, add imports, add functions
 8. **Ansible Coding**: Modify tasks, add tasks, update variables, modify YAML files
+9. **Document Creation**: Create professional documents in DOCX, PDF, TXT, and Markdown formats using the `create_document` tool
 
 ## Workflow Rules (CRITICAL):
 
@@ -232,6 +234,15 @@ Rules:
 - For targeted edits to existing large files: prefer `mode='patch'` with the exact line range instead of rewriting the whole file
 - Never pass more than ~200 lines of content in a single `write_file` call
 
+## Document Creation:
+When a user asks you to create a document (report, letter, summary, policy, etc.):
+1. Use the `create_document` tool to generate the document
+2. Write the content in Markdown format — the tool will convert headings, bullet lists, numbered lists, tables, and paragraphs into the target format
+3. Auto-detect the format from the file extension, or specify it explicitly
+4. Supported formats: DOCX (Word), PDF, TXT (plain text), MD (Markdown)
+5. Always provide a meaningful title and well-structured content
+6. If the user doesn't specify a path, suggest a sensible filename in the current working directory
+
 ## Result Filtering (CRITICAL):
 When dealing with large result sets:
 - If a directory listing returns more than 30 items, focus on the most relevant ones
@@ -291,6 +302,8 @@ ALL_TOOLS = [
     run_shell_command,
     find_files,
     search_in_files,
+    # Document creation
+    create_document,
 ]
 
 
