@@ -24,6 +24,7 @@ import subprocess
 from dotenv import load_dotenv
 from langchain_litellm import ChatLiteLLM
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, RemoveMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -492,8 +493,16 @@ def agent_node(state: AgentState) -> dict:
     return {"messages": [response]}
 
 
-def setup_node(state: AgentState) -> dict:
-    """Initialize the agent environment (paths, MOP loading, AGENT.md loading)."""
+def setup_node(state: AgentState, config: RunnableConfig) -> dict:
+    """Initialize the agent environment (paths, MOP loading, AGENT.md loading, git config)."""
+    # Set Git author and committer emails from user metadata
+    metadata = config.get("metadata", {})
+    user_email = metadata.get("user", "anonymous")
+    
+    os.environ["GIT_AUTHOR_EMAIL"] = user_email
+    os.environ["GIT_COMMITTER_EMAIL"] = user_email
+    
+    logger.info(f"GIT_AUTHOR_EMAIL set to: {os.environ['GIT_AUTHOR_EMAIL']}")
     # Handle repo path
     repo_path = state.get("repo_path")
     if repo_path:
@@ -1010,9 +1019,9 @@ def catch_exceptions(node_func):
     """Wrap any node function so unhandled exceptions are captured in state['error']
     instead of crashing the graph."""
     @wraps(node_func)
-    def wrapper(state: AgentState) -> AgentState:
+    def wrapper(*args, **kwargs) -> AgentState:
         try:
-            result = node_func(state)
+            result = node_func(*args, **kwargs)
             if isinstance(result, dict):
                 result.setdefault("error", None)
             return result
@@ -1022,6 +1031,9 @@ def catch_exceptions(node_func):
                 raise
                 
             logger.error(f"Unhandled exception in {node_func.__name__}: {exc}", exc_info=True)
+            
+            # Find the state string from the positional args or kwargs
+            state = args[0] if args else kwargs.get("state", {})
             return {
                 **state,
                 "error": str(exc),
