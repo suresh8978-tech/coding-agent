@@ -473,15 +473,12 @@ def tools_node(state: AgentState) -> dict:
             remote = args.get("remote", "origin")
             branch = args.get("branch", "")
 
-            print(f"\n{'='*50}")
-            print(f"PUSH APPROVAL REQUIRED")
-            print(f"Remote: {remote}")
-            print(f"Branch: {branch or 'current (HEAD)'}")
-            print(f"{'='*50}")
-
+            push_prompt_msg = f"PUSH APPROVAL REQUIRED\nRemote: {remote}\nBranch: {branch or 'current (HEAD)'}"
+            
             try:
-                approval = input("Push to remote? (yes/no): ").strip().lower()
-            except EOFError:
+                user_response = interrupt(push_prompt_msg)
+                approval = str(user_response).strip().lower()
+            except Exception:
                 approval = "no"
 
             if approval in ["yes", "y", "push", "ok", "proceed"]:
