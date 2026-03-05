@@ -831,7 +831,7 @@ def push_approval_node(state: AgentState) -> dict:
             "awaiting_push_approval": False,
             "pending_push_call": None,
             "messages": [
-                AIMessage(content="Push cancelled by user. No changes were pushed to the remote repository.")
+                HumanMessage(content="[SYSTEM] Push cancelled by user. No changes were pushed to the remote repository.")
             ]
         }
     else:
@@ -842,7 +842,7 @@ def push_approval_node(state: AgentState) -> dict:
             "pending_push_call": None,
             "user_feedback": user_response,
             "messages": [
-                AIMessage(content=f"Push deferred. User feedback: {user_response}")
+                HumanMessage(content=f"[SYSTEM] Push deferred. User feedback: {user_response}")
             ],
         }
 
@@ -857,7 +857,7 @@ def execute_push_node(state: AgentState) -> dict:
     if not pending_push:
         logger.warning("execute_push_node called but no pending_push_call found")
         return {
-            "messages": [AIMessage(content="No pending push to execute.")],
+            "messages": [HumanMessage(content="[SYSTEM] No pending push to execute.")],
             "push_approved": False,
             "pending_push_call": None,
             "awaiting_push_approval": False,
@@ -889,7 +889,7 @@ def execute_push_node(state: AgentState) -> dict:
     logger.info(f"git_push result: {msg}")                    
     
     return {
-        "messages": [AIMessage(content=msg)],
+        "messages": [HumanMessage(content=f"[SYSTEM] git_push result:\n{msg}")],
         "push_approved": False,
         "pending_push_call": None,
         "awaiting_push_approval": False,
