@@ -1,0 +1,30 @@
+# ── User Access Configuration ──────────────────────
+# This file controls who can access the agent and what they can do.
+#
+# Access Levels:
+#   read-only  → Can view files and run terraform plan/validate only
+#   read-write → Can view, create, modify, delete files and run terraform commands
+#   admin      → Everything + can push to remote git repository
+#
+# The agent reads this file on every request.
+# Changes take effect immediately — no restart needed.
+
+# Admin users — have full access to all operations
+admins:
+  - email: "sureshnel9@gmail.com"
+    name: "Suresh"
+    access: "admin"
+
+# Regular users
+users:
+  - email: "developer1@example.com"
+    name: "Developer 1"
+    access: "read-write"
+
+  - email: "reviewer1@example.com"
+    name: "Reviewer 1"
+    access: "read-only"
+
+# Default access for users not listed above
+# Options: "deny", "read-only", "read-write"
+default_access: "deny"
