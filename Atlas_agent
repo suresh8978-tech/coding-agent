@@ -1,0 +1,489 @@
+"""
+ATLAS AGENT - AAP Job Diagnostic Analyzer
+
+A LangGraph-based agent that analyzes Ansible Automation Platform job executions
+and provides detailed diagnostic reports.
+
+Supports multiple AAP instances: Automation, Orchestration, Orchestration Lab.
+
+Usage:
+    python agent.py
+"""
+
+import os
+import re
+import json
+import logging
+import uuid
+from typing import Annotated, Any, Literal, Optional, TypedDict
+
+from dotenv import load_dotenv
+from langchain_litellm import ChatLiteLLM
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
+
+from tools.aap_events import fetch_job_events
+from tools.config import Settings, load_settings
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+def setup_logging():
+    """Configure logging to file only."""
+    agent_dir = os.path.dirname(os.path.abspath(__file__))
+    log_file_path = os.path.join(agent_dir, "atlas_agent.log")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_file_path),
+        ],
+    )
+
+
+# =============================================================================
+# Global State
+# =============================================================================
+
+runtime_settings: Settings | None = None
+current_job_id: int | None = None
+selected_instance: str | None = None
+
+
+# =============================================================================
+# Agent State Definition
+# =============================================================================
+
+class AgentState(TypedDict):
+    """State for the ATLAS diagnostic agent."""
+    messages: Annotated[list, add_messages]
+    job_id: Optional[int]
+    instance: Optional[str]
+
+
+# =============================================================================
+# System Prompt
+# =============================================================================
+
+SYSTEM_PROMPT = (
+    "You are an expert Ansible execution diagnostics analyst. "
+    "When a job ID is provided, call get_job_events(job_id) to fetch the event data. "
+    "Then produce a concise, practical diagnostic report with these sections:\n\n"
+    "1. **Executive Summary** - Job overview, status, duration, key stats. "
+    "If the job launched any child jobs, include the child job ID(s) in the summary.\n"
+    "2. **Timeline Highlights** - Key events in chronological order\n"
+    "3. **Failure Signals** - Any errors, warnings, or failed tasks\n"
+    "4. **Probable Root Cause** - Analysis of what went wrong (or confirmation of success)\n"
+    "5. **Recommended Next Checks** - Actionable next steps\n\n"
+    "Be thorough but concise. Use tables and formatting for clarity.\n\n"
+    "IMPORTANT RULES:\n"
+    "- If the job has child jobs, clearly show the child job ID(s) in the Executive Summary "
+    "and mention them in the Timeline.\n"
+    "- After the report, if a child job exists, ask if the user wants to analyze it. "
+    "Include the child job ID in the question.\n"
+    "- You can answer ANY follow-up questions about the job using the event data "
+    "already fetched. You do not need to call get_job_events again for the same job.\n"
+    "- If the user asks about a different job ID, call get_job_events with the new ID.\n"
+    "- If the user asks which instance you are connected to, tell them.\n"
+    "- If the user asks to switch instance, tell them to type 'switch' to change instance."
+)
+
+
+# =============================================================================
+# Instance Helpers
+# =============================================================================
+
+INSTANCES = {
+    "1": "automation",
+    "2": "orchestration",
+    "3": "orchestration_lab",
+    "automation": "automation",
+    "orchestration": "orchestration",
+    "orchestration_lab": "orchestration_lab",
+    "orchestration lab": "orchestration_lab",
+    "lab": "orchestration_lab",
+}
+
+INSTANCE_DISPLAY = {
+    "automation": "Automation",
+    "orchestration": "Orchestration",
+    "orchestration_lab": "Orchestration Lab",
+}
+
+
+def resolve_instance(user_input: str) -> str | None:
+    """Resolve user input to an instance name."""
+    return INSTANCES.get(user_input.strip().lower())
+
+
+def get_instance_display(instance: str) -> str:
+    """Get display name for an instance."""
+    return INSTANCE_DISPLAY.get(instance, instance.replace("_", " ").title())
+
+
+def set_instance(instance: str):
+    """Set the global instance and load settings."""
+    global selected_instance, runtime_settings
+    selected_instance = instance
+    runtime_settings = load_settings(selected_instance)
+    logger.info(f"Instance set to: {selected_instance}, hostname: {runtime_settings.atlas_hostname}")
+
+
+# =============================================================================
+# Tools
+# =============================================================================
+
+def build_tools():
+    """Build tools with global settings baked in."""
+    global runtime_settings
+
+    @tool
+    def get_job_events(job_id: int) -> str:
+        """Fetch all Ansible Automation Platform job events for a job id."""
+        logger.info(f"Fetching events for job {job_id}")
+        events = fetch_job_events(job_id=job_id, settings=runtime_settings)
+        logger.info(f"Retrieved {len(events)} events for job {job_id}")
+        payload: dict[str, Any] = {
+            "job_id": job_id,
+            "event_count": len(events),
+            "events": events,
+        }
+        return json.dumps(payload, ensure_ascii=True)
+
+    return [get_job_events]
+
+
+# =============================================================================
+# Node Functions
+# =============================================================================
+
+def select_instance_node(state: AgentState) -> dict:
+    """Ask user to select AAP instance via interrupt. Only asks once."""
+    global runtime_settings, selected_instance
+
+    # Skip if already selected
+    if state.get("instance") and runtime_settings:
+        logger.info(f"Instance already selected: {state['instance']}")
+        return {}
+
+    # Skip if global is set (same process, different thread)
+    if selected_instance and runtime_settings:
+        logger.info(f"Using previously selected instance: {selected_instance}")
+        return {"instance": selected_instance}
+
+    logger.info("Asking user to select AAP instance via interrupt")
+
+    instance = interrupt(
+        "Which AAP instance do you want to work on?\n"
+        "  1. Automation\n"
+        "  2. Orchestration\n"
+        "  3. Orchestration Lab\n\n"
+        "Enter 1, 2, or 3:"
+    )
+
+    instance_str = str(instance).strip().lower()
+    resolved = resolve_instance(instance_str)
+    if not resolved:
+        resolved = "automation"
+
+    set_instance(resolved)
+    logger.info(f"Selected instance: {selected_instance}")
+
+    return {"instance": selected_instance}
+
+
+def agent_node(state: AgentState) -> dict:
+    """Main agent node that processes messages and decides actions."""
+    global runtime_settings
+
+    messages = list(state["messages"])
+
+    # Add system prompt if not present
+    if not messages or not isinstance(messages[0], SystemMessage):
+        system_content = SYSTEM_PROMPT
+        if selected_instance:
+            system_content += f"\n\nYou are currently connected to the {get_instance_display(selected_instance)} instance."
+        messages = [SystemMessage(content=system_content)] + messages
+
+    logger.info(f"Invoking LLM with model: {runtime_settings.llm_name}")
+
+    # Build LLM
+    llm_kwargs = {
+        "model": runtime_settings.llm_name,
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+        "max_tokens": 7186,
+        "drop_params": True,
+    }
+    api_url = os.getenv("ANTHROPIC_API_URL")
+    if api_url:
+        llm_kwargs["api_base"] = api_url
+
+    llm = ChatLiteLLM(**llm_kwargs)
+    tools = build_tools()
+    agent = llm.bind_tools(tools)
+
+    response = agent.invoke(messages)
+    logger.info("LLM response received")
+
+    return {"messages": [response]}
+
+
+def tools_node(state: AgentState) -> dict:
+    """Execute tool calls."""
+    messages = state["messages"]
+    last_message = messages[-1]
+
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        return {}
+
+    logger.info("-" * 60)
+    logger.info("TOOL EXECUTION")
+    for tc in last_message.tool_calls:
+        logger.info(f"  Tool: {tc['name']}, Args: {tc.get('args', {})}")
+    logger.info("-" * 60)
+
+    tools = build_tools()
+    tool_node = ToolNode(tools, handle_tool_errors=True)
+    result = tool_node.invoke(state)
+
+    result_messages = result.get("messages", [])
+    for msg in result_messages:
+        if isinstance(msg, ToolMessage):
+            output = msg.content if isinstance(msg.content, str) else str(msg.content)
+            logger.info(f"  Tool output length: {len(output)} chars")
+
+    return {"messages": result_messages}
+
+
+# =============================================================================
+# Routing
+# =============================================================================
+
+def should_continue(state: AgentState) -> Literal["tools", "end"]:
+    """Determine if agent should call tools or finish."""
+    messages = state["messages"]
+    last_message = messages[-1] if messages else None
+
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+
+    return "end"
+
+
+# =============================================================================
+# Graph Construction
+# =============================================================================
+
+def create_graph():
+    """Build the ATLAS agent graph."""
+    workflow = StateGraph(AgentState)
+
+    workflow.add_node("select_instance", select_instance_node)
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", tools_node)
+
+    workflow.set_entry_point("select_instance")
+
+    workflow.add_edge("select_instance", "agent")
+
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", "end": END},
+    )
+
+    workflow.add_edge("tools", "agent")
+
+    checkpointer = MemorySaver()
+    return workflow.compile(checkpointer=checkpointer)
+
+
+# =============================================================================
+# Initial State
+# =============================================================================
+
+def create_initial_state() -> AgentState:
+    """Create initial agent state."""
+    return {
+        "messages": [],
+        "job_id": None,
+        "instance": selected_instance,
+    }
+
+
+# =============================================================================
+# Interactive Runner (CLI - same pattern as coding agent)
+# =============================================================================
+
+def run_interactive():
+    """Run the agent in interactive mode with interrupt-based instance selection."""
+    from langgraph.errors import GraphInterrupt
+
+    setup_logging()
+    graph = create_graph()
+    state = create_initial_state()
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
+
+    interrupted = False
+    first_invocation = True
+
+    print()
+    print("=" * 60)
+    print("  ATLAS AGENT - AAP Job Diagnostic Analyzer")
+    print("=" * 60)
+    print()
+    print("  I can analyze Ansible Automation Platform job executions")
+    print("  and provide detailed diagnostic reports.")
+    print()
+    print("  Commands:")
+    print("    - Enter a job ID to analyze")
+    print("    - 'instance' to see current instance")
+    print("    - 'switch' to change instance")
+    print("    - 'help' for more info")
+    print("    - 'quit' or 'exit' to exit")
+    print()
+    print("=" * 60)
+    print()
+
+    try:
+        while True:
+            try:
+                user_input = input("You: ").strip()
+            except EOFError:
+                break
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ("quit", "exit", "q"):
+                print("Goodbye!")
+                break
+
+            if user_input.lower() == "help":
+                print("\n  Enter any AAP job ID (numeric) to get a full")
+                print("  diagnostic report including:")
+                print("    - Executive Summary")
+                print("    - Timeline Highlights")
+                print("    - Failure Signals")
+                print("    - Probable Root Cause")
+                print("    - Recommended Next Checks")
+                print()
+                print("  Other commands:")
+                print("    - 'instance' to see current instance")
+                print("    - 'switch' to switch between instances")
+                print("    - 'quit' or 'exit' to exit")
+                continue
+
+            # Show current instance
+            if user_input.lower().strip() in ("instance", "which instance", "current instance"):
+                if selected_instance:
+                    print(f"\n  Currently connected to: {get_instance_display(selected_instance)} instance\n")
+                else:
+                    print("\n  No instance selected yet. It will be asked on first use.\n")
+                continue
+
+            # Switch instance
+            if user_input.lower().strip() in ("switch", "switch instance", "change instance"):
+                print("\n  Select instance:")
+                print("    1. Automation")
+                print("    2. Orchestration")
+                print("    3. Orchestration Lab")
+                while True:
+                    try:
+                        choice = input("  Enter 1, 2, or 3: ").strip()
+                    except (KeyboardInterrupt, EOFError):
+                        break
+                    resolved = resolve_instance(choice)
+                    if resolved:
+                        set_instance(resolved)
+                        # New thread for new instance
+                        thread_id = str(uuid.uuid4())
+                        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
+                        state = create_initial_state()
+                        first_invocation = True
+                        interrupted = False
+                        print(f"\n  Switched to {get_instance_display(selected_instance)} instance.")
+                        print("  Enter a job ID to analyze.\n")
+                        break
+                    else:
+                        print("  Invalid choice. Please enter 1, 2, or 3.")
+                continue
+
+            try:
+                if interrupted:
+                    # Resume from interrupt with user's response
+                    try:
+                        result = graph.invoke(Command(resume=user_input), config)
+                        interrupted = False
+                    except GraphInterrupt as e:
+                        interrupt_value = e.args[0] if e.args else "Input required"
+                        print(f"\n{interrupt_value}\n")
+                        continue
+                else:
+                    if first_invocation:
+                        # First invocation: pass the full initial state with first message
+                        state["messages"] = [HumanMessage(content=user_input)]
+                        try:
+                            result = graph.invoke(state, config)
+                        except GraphInterrupt as e:
+                            interrupted = True
+                            interrupt_value = e.args[0] if e.args else "Input required"
+                            print(f"\n{interrupt_value}\n")
+                            first_invocation = False
+                            continue
+                        first_invocation = False
+                    else:
+                        try:
+                            result = graph.invoke(
+                                {"messages": [HumanMessage(content=user_input)]},
+                                config,
+                            )
+                        except GraphInterrupt as e:
+                            interrupted = True
+                            interrupt_value = e.args[0] if e.args else "Input required"
+                            print(f"\n{interrupt_value}\n")
+                            continue
+
+                # Update state
+                state = result
+
+                # Print the last AI message
+                for msg in reversed(state["messages"]):
+                    if isinstance(msg, AIMessage) and msg.content:
+                        print(f"\nAgent: {msg.content}\n")
+                        break
+
+            except Exception as e:
+                error_msg = str(e)
+                print(f"\nError: {error_msg}\n")
+                import traceback
+                traceback.print_exc()
+                interrupted = False
+
+    except KeyboardInterrupt:
+        print("\n\nInterrupted. Goodbye!")
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    setup_logging()
+    logger.info("ATLAS AGENT started")
+    run_interactive()
+    logger.info("ATLAS AGENT stopped")
